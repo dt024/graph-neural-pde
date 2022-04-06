@@ -187,10 +187,13 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt,**best_opt}
-  wandb_name = f"step: {opt['step_size']} type: {opt['discritize_type']} depth: {opt['depth']}"
-  wandb.init(project="Grand_Discritize", entity="dungxibo123", name=wandb_name, group=opt['dataset'])
+  wandb_name = f"step: {opt['step_size']} type: {opt['discritize_type']} depth: {opt['depth']} trunc_alpha: {opt['trunc_alpha']}"
+  num_run = f"run-time: {opt['run_time']}"
+  group_name = 'RK4' + opt['dataset'] + 'final'
+  print(wandb_name, group_name, num_run)
+  wandb.init(project="Grand_Discritize", entity="dungxibo123", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
   wandb.config = opt
-
+  print(opt['step_size'])
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
 
@@ -220,7 +223,6 @@ def main(cmd_opt):
   best_time = best_epoch = train_acc = val_acc = test_acc = 0
 
   this_test = test_OGB if opt['dataset'] == 'ogbn-arxiv' else test
-
   for epoch in tqdm.tqdm(range(1, opt['epoch'] + 1)):
     
     start_time = time.time()
@@ -228,7 +230,6 @@ def main(cmd_opt):
     if opt['rewire_KNN'] and epoch % opt['rewire_KNN_epoch'] == 0 and epoch != 0:
       ei = apply_KNN(data, pos_encoding, model, opt)
       model.odeblock.odefunc.edge_index = ei
-
     loss = train(model, optimizer, data, pos_encoding)
     tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
@@ -295,6 +296,8 @@ if __name__ == '__main__':
 
   ### discritized param
   parser.add_argument('--depth', type=int, default=10, help='Default depth of the network')
+  parser.add_argument('--trunc_alpha', type=float, default=1.0, help='Default power of trunc function')
+  parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
   parser.add_argument('--discritize_type', type=str, default="norm", help="norm or acc_norm")
 
 
@@ -422,5 +425,8 @@ if __name__ == '__main__':
   args = parser.parse_args()
 
   opt = vars(args)
-  print(opt["attention_type"])
-  main(opt)
+#   print(opt["attention_type"])
+#   print(opt['epoch'])
+  for _ in range(20):
+      main(opt)
+      opt['run_time'] += 1

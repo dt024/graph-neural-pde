@@ -108,6 +108,7 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
     if self.opt['use_labels']:
       y = x[:, -self.num_classes:]
       x = x[:, :-self.num_classes]
+   # print(x.shape)
     if self.opt['beltrami']:
       x = F.dropout(x, self.opt['input_dropout'], training=self.training)
       x = self.mx(x)
@@ -116,13 +117,15 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
       x = torch.cat([x, p], dim=1)
     else:
       x = F.dropout(x, self.opt['input_dropout'], training=self.training)
+#       print("after drop", x)
       x = self.m1(x)
-
+#     print("After 2",x)
     if self.opt['use_mlp']:
       x = F.dropout(x, self.opt['dropout'], training=self.training)
       x = F.dropout(x + self.m11(F.relu(x)), self.opt['dropout'], training=self.training)
       x = F.dropout(x + self.m12(F.relu(x)), self.opt['dropout'], training=self.training)
     # todo investigate if some input non-linearity solves the problem with smooth deformations identified in the ANODE paper
+#     print("after 3", x)
 
     if self.opt['use_labels']:
       x = torch.cat([x, y], dim=-1)
@@ -135,11 +138,37 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
     out = x
-#    print(f"This is the output shape before forward those Blocks: {x.shape}")
+#     print(f"This is the output shape before forward those Blocks: {x.shape}")
     for i in range(len(self.mol_list)):
       if self.discritize_type=="norm":
-
-        out = out + self.step_size * self.mol_list[i](out) * torch.norm(out, dim=(-1), keepdim=True)
+#         print(torch.norm(out, dim=(-1)).shape)
+#         print(self.mol_list[i](out).shape)
+#         print(out)
+#         print(torch.norm(out, dim=(-1)))
+#         print(torch.pow(torch.norm(out, dim=(-1)),1))
+#         print("----")
+        trunc_alpha = self.opt['trunc_alpha']
+        trunc_k1 = torch.pow(torch.norm(out, dim=(-1)).unsqueeze(1), trunc_alpha)
+        trunc_k1[torch.abs(trunc_k1)>1] = 1
+        k1 = self.mol_list[i](out) * trunc_k1
+        
+        inp_k2 = out + self.step_size/2 * k1
+        trunc_k2 = torch.pow(torch.norm(inp_k2, dim=(-1)).unsqueeze(1),trunc_alpha)
+        trunc_k2[torch.abs(trunc_k2)>1] = 1
+        k2 = self.mol_list[i](inp_k2) * trunc_k2
+        
+        inp_k3 = out + self.step_size/2 * k2
+        trunc_k3 = torch.pow(torch.norm(inp_k3, dim=(-1)).unsqueeze(1),trunc_alpha)
+        trunc_k3[torch.abs(trunc_k3)>1] = 1
+        k3 = self.mol_list[i](inp_k3) * trunc_k3
+        
+        inp_k4 = out + self.step_size * k3
+        trunc_k4 = torch.pow(torch.norm(inp_k4, dim=(-1)).unsqueeze(1),trunc_alpha)
+        trunc_k4[torch.abs(trunc_k4)>1] = 1
+        k4 = self.mol_list[i](inp_k4) * trunc_k4
+        
+        out = out + self.step_size / 6 * (k1 + 2*k2 + 2*k3 + k4)
+        #out = out + self.step_size * self.mol_list[i](out) * torch.norm(out, dim=(-1), keepdim=True)
         ####
 
       elif self.discritize_type == "accumulate_norm":
