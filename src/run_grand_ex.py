@@ -142,7 +142,11 @@ def test(model, data, pos_encoding=None, opt=None):  # opt required for runtime 
     pred = logits[mask].max(1)[1]
     acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
     accs.append(acc)
-  return accs
+  model.opt['depth'] = model.opt['depth']*3 
+  outs = model(feat,debug=True)
+  model.opt['depth'] = model.opt['depth']//3
+  return accs, outs
+  # return accs
 
 
 def print_model_params(model):
@@ -187,11 +191,15 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt,**best_opt}
-  wandb_name = f"step: {opt['step_size']} type: {opt['discritize_type']} depth: {opt['depth']} trunc_alpha: {opt['trunc_alpha']}"
+  wandb_name = f"step: {opt['step_size']} depth: {opt['depth']} trunc_alpha: {opt['trunc_alpha']} k: {opt['k']}"
   num_run = f"run-time: {opt['run_time']}"
-  group_name = 'RK4' + opt['dataset'] + 'final'
+  if opt["one_block"]:
+     group_name = 'RK4' + opt['dataset'] + 'OneBlock'
+  else:
+     group_name = 'RK4' + opt['dataset'] + 'final'
+ 
   print(wandb_name, group_name, num_run)
-  wandb.init(project="Grand_Discritize", entity="dungxibo123", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
   wandb.config = opt
   print(opt['step_size'])
   if cmd_opt['beltrami']:
@@ -261,6 +269,13 @@ def main(cmd_opt):
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(tmp_val_acc, tmp_test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
+  wandb.log(
+      {
+          'best_epoch' : best_epoch,
+          'best_val' : tmp_val_acc,
+          'best_test' : tmp_test_acc
+      }
+           )
   return train_acc, val_acc, test_acc
 
 
@@ -295,11 +310,13 @@ if __name__ == '__main__':
 
 
   ### discritized param
-  parser.add_argument('--depth', type=int, default=10, help='Default depth of the network')
-  parser.add_argument('--trunc_alpha', type=float, default=1.0, help='Default power of trunc function')
+  parser.add_argument('--depth', type=int, default=50, help='Default depth of the network')
+  parser.add_argument('--trunc_alpha', type=float, default=2.0, help='Default power of trunc function')
+  parser.add_argument('--trunc_coeff', type=float, default=1.0, help='Default power of trunc function')
   parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
   parser.add_argument('--discritize_type', type=str, default="norm", help="norm or acc_norm")
-
+  parser.add_argument('--one_block', action='store_true', help='perform Linear Attention')
+  parser.add_argument('--k', type=float, default=0.0, help='Default power of changing I')
 
   ################# end of discritized param
   parser.add_argument('--no_alpha_sigmoid', dest='no_alpha_sigmoid', action='store_true',
@@ -331,7 +348,7 @@ if __name__ == '__main__':
   parser.add_argument("--tol_scale_adjoint", type=float, default=1.0,
                       help="multiplier for adjoint_atol and adjoint_rtol")
   parser.add_argument('--ode_blocks', type=int, default=1, help='number of ode blocks to run')
-  parser.add_argument("--max_nfe", type=int, default=1000,
+  parser.add_argument("--max_nfe", type=int, default=10000,
                       help="Maximum number of function evaluations in an epoch. Stiff ODEs will hang if not set.")
   parser.add_argument("--no_early", action="store_true",
                       help="Whether or not to use early stopping of the ODE integrator when testing.")
@@ -427,6 +444,6 @@ if __name__ == '__main__':
   opt = vars(args)
 #   print(opt["attention_type"])
 #   print(opt['epoch'])
-  for _ in range(20):
+  for _ in range(4):
       main(opt)
       opt['run_time'] += 1
