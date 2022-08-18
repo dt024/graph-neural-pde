@@ -1,4 +1,7 @@
 import argparse
+from distutils.log import debug
+from statistics import mean
+import gc
 import numpy as np
 import torch
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
@@ -65,32 +68,74 @@ def train(model, optimizer, data, pos_encoding=None):
   else:
     train_pred_idx = data.train_mask
 
-  out = model(feat, pos_encoding)
-
+  out_model = model(feat, pos_encoding, debug = True)
+  out = out_model[0]
+  ##CALCULATING REGULAZATION FOR R
+  # last_state = torch.norm(out_model[1][-1][data.train_mask], dim=1)
+  states = torch.stack(out_model[1],dim=0)
+  # print(states.size())
+  last_state = states[:,data.train_mask]
+  state_sin = torch.sin(last_state)
+  state_cos = torch.cos(last_state)
+  train_label = data.y.squeeze()[data.train_mask]
+  sin_label = [0 for _ in range(model.num_classes)]
+  cos_label = [0 for _ in range(model.num_classes)]
+  r_reg_loss = 0
+  label_r = all_r = 0
+  # print("last_state", last_state.size())
+  # print("sin_state", state_sin.size())
+  for m in range(1,2):
+    sin_label_order = cos_label_order = 0
+    for label in range(model.num_classes):
+      if m==1:
+        sin_label[label] = torch.mean(state_sin[:,train_label==label], dim=1)
+        # print("label sin state", sin_label[label].size())
+        cos_label[label] = torch.mean(state_cos[:,train_label==label], dim=1)
+        mean_feas = torch.mean(torch.ones_like(sin_label[label]) - torch.sqrt(cos_label[label]**2 + sin_label[label]**2), dim=-1)
+        mean_time = torch.mean(mean_feas) 
+        r_reg_loss +=  mean_time / model.num_classes
+        # print("mean_feas, mean_time",mean_feas.size(),mean_time.size())
+        label_r = torch.clone(r_reg_loss)
+      # print(label, torch.mean(1-cos_label[label]**2 - sin_label[label]**2)/ model.num_classes, label_r, r_reg_loss)
+      avg_phi = torch.mean(last_state[:, train_label==label], dim=1)
+      sin_label_order += torch.sin(m*avg_phi) 
+      cos_label_order += torch.cos(m*avg_phi)  
+    mean_feas = torch.mean((sin_label_order**2 + cos_label_order**2)**0.5 / model.num_classes , dim=-1)
+    mean_time = torch.mean(mean_feas)/m
+    r_reg_loss += mean_time 
+    all_r += torch.clone(mean_time)
+  # for label1 in range(model.num_classes):
+  #   for label2 in range(label1+1, model.num_classes):
+  #       r_reg_loss -= (torch.sum((sin_label[label1] - sin_label[label2])**2 + (cos_label[label1] - cos_label[label2])**2))
+  
   if model.opt['dataset'] == 'ogbn-arxiv':
     lf = torch.nn.functional.nll_loss
-    loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask])
+    loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask]) +r_reg_loss
   else:
     lf = torch.nn.CrossEntropyLoss()
-    loss = lf(out[data.train_mask], data.y.squeeze()[data.train_mask])
-  if hasattr(model, 'odeblock') and model.odeblock.nreg > 0:  # add regularisation - slower for small data, but faster and better performance for large data
-    reg_states = tuple(torch.mean(rs) for rs in model.reg_states)
-    regularization_coeffs = model.regularization_coeffs
+    loss = lf(out[data.train_mask], data.y.squeeze()[data.train_mask]) + r_reg_loss
+    # loss = r_reg_loss
+  # if hasattr(model, 'odeblock') and model.odeblock.nreg > 0:  # add regularisation - slower for small data, but faster and better performance for large data
+  #   reg_states = tuple(torch.mean(rs) for rs in model.reg_states)
+  #   regularization_coeffs = model.regularization_coeffs
 
-    reg_loss = sum(
-      reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0
-    )
-    loss = loss + reg_loss
-  try:
-    model.fm.update(model.getNFE())
-    model.resetNFE()
-    model.bm.update(model.getNFE())
-    model.resetNFE()
-  except Exception as e:
-    pass
+  #   reg_loss = sum(
+  #     reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0
+  #   )
+  #   loss = loss + reg_loss
+  # try:
+  #   model.fm.update(model.getNFE())
+  #   model.resetNFE()
+  #   model.bm.update(model.getNFE())
+  #   model.resetNFE()
+  # except Exception as e:
+  #   pass
   loss.backward()
+  torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
   optimizer.step()
-  return loss.item()
+  # return loss.item()
+  torch.cuda.empty_cache()
+  return loss.item(), label_r, all_r
 
 
 def train_OGB(model, mp, optimizer, data, pos_encoding=None):
@@ -132,21 +177,55 @@ def train_OGB(model, mp, optimizer, data, pos_encoding=None):
 
 
 @torch.no_grad()
-def test(model, data, pos_encoding=None, opt=None):  # opt required for runtime polymorphism
+def test(model, data, pos_encoding=None, opt=None, debug=False):  # opt required for runtime polymorphism
   model.eval()
   feat = data.x
   if model.opt['use_labels']:
     feat = add_labels(feat, data.y, data.train_mask, model.num_classes, model.device)
-  logits, accs = model(feat, pos_encoding), []
+  # logits, accs = model(feat, pos_encoding), []
+  out_model = model(feat, pos_encoding, debug = True)
+  logits, accs = out_model[0], []
+  ##CALCULATING REGULAZATION FOR R
+  # last_state = torch.norm(out_model[1][-1][data.train_mask], dim=1)
+  states = torch.stack(out_model[1],dim=0)
+  # print(states.size())
+  last_state = states[:,data.train_mask]
+  state_sin = torch.sin(last_state)
+  state_cos = torch.cos(last_state)
+  train_label = data.y.squeeze()[data.train_mask]
+  sin_label = [0 for _ in range(model.num_classes)]
+  cos_label = [0 for _ in range(model.num_classes)]
+  r_reg_loss = 0
+  label_r = 0
+  # print("last_state", last_state.size())
+  # print("sin_state", state_sin.size())
+  sin_label_order = cos_label_order = 0
+  for label in range(model.num_classes):
+    sin_label[label] = torch.mean(state_sin[:,train_label==label], dim=1)
+    # print("label sin state", sin_label[label].size())
+    cos_label[label] = torch.mean(state_cos[:,train_label==label], dim=1)
+    mean_feas = torch.mean(torch.ones_like(sin_label[label]) - torch.sqrt(cos_label[label]**2 + sin_label[label]**2), dim=-1)
+    mean_time = torch.mean(mean_feas)
+    r_reg_loss +=  mean_time / model.num_classes
+    # print("mean_feas, mean_time",mean_feas.size(),mean_time.size())
+    label_r = torch.clone(r_reg_loss)
+    # print(label, torch.mean(1-cos_label[label]**2 - sin_label[label]**2)/ model.num_classes, label_r, r_reg_loss)
+    avg_phi = torch.mean(last_state[:, train_label==label], dim=1)
+    sin_label_order += torch.sin(avg_phi) / model.num_classes
+    cos_label_order += torch.cos(avg_phi) / model.num_classes
+  mean_feas = torch.mean((sin_label_order**2 + cos_label_order**2)**0.5, dim=-1)
+  mean_time = torch.mean(mean_feas)
+  r_reg_loss += mean_time
+  all_r = torch.clone(mean_time)
+
   for _, mask in data('train_mask', 'val_mask', 'test_mask'):
     pred = logits[mask].max(1)[1]
     acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
     accs.append(acc)
-  model.opt['depth'] = model.opt['depth']*3 
-  outs = model(feat,debug=True)
-  model.opt['depth'] = model.opt['depth']//3
-  return accs, outs
-  # return accs
+  # outs = model(feat,debug=True)
+  if debug==True:
+    return accs, out_model, label_r, all_r
+  return accs
 
 
 def print_model_params(model):
@@ -191,10 +270,10 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt,**best_opt}
-  wandb_name = f"step: {opt['step_size']} depth: {opt['depth']} trunc_alpha: {opt['trunc_alpha']} k: {opt['k']}"
+  wandb_name = f"step: {opt['step_size']} depth: {opt['depth']}  coupling_strength: {opt['coupling_strength']}"
   num_run = f"run-time: {opt['run_time']}"
   if opt["one_block"]:
-     group_name = 'RK4' + opt['dataset'] + 'OneBlock'
+     group_name = 'Kuramoto_' + opt['dataset'] + 'OneBlock'
   else:
      group_name = 'RK4' + opt['dataset'] + 'final'
  
@@ -238,7 +317,7 @@ def main(cmd_opt):
     if opt['rewire_KNN'] and epoch % opt['rewire_KNN_epoch'] == 0 and epoch != 0:
       ei = apply_KNN(data, pos_encoding, model, opt)
       model.odeblock.odefunc.edge_index = ei
-    loss = train(model, optimizer, data, pos_encoding)
+    loss, label_r, between_r = train(model, optimizer, data, pos_encoding)
     tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
     best_time = opt['time']
@@ -248,6 +327,8 @@ def main(cmd_opt):
       val_acc = tmp_val_acc
       test_acc = tmp_test_acc
       best_time = opt['time']
+      best_label_r = label_r
+      best_between_r = between_r
 #    if not opt['no_early'] and model.odeblock.test_integrator.solver.best_val > val_acc:
 #      best_epoch = epoch
 #      val_acc = model.odeblock.test_integrator.solver.best_val
@@ -255,25 +336,33 @@ def main(cmd_opt):
 #      train_acc = model.odeblock.test_integrator.solver.best_train
 #      best_time = model.odeblock.test_integrator.solver.best_time
 
-    log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
+    log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, InLabel_R: {:.4f}, Between_R: {:.4f}, Best time: {:.4f}'
 
-    print(log.format(epoch, time.time() - start_time, loss, tmp_train_acc, tmp_val_acc, tmp_test_acc, best_time))
+    print(log.format(epoch, time.time() - start_time, loss, tmp_train_acc, tmp_val_acc, tmp_test_acc, label_r, between_r, best_time))
     wandb.log(
         {
             'train_acc': tmp_train_acc,
             'test_acc': tmp_test_acc,
             'val_acc': tmp_val_acc,
+            'label_r':label_r,
+            'between_r':between_r,
             'loss': loss
         }
     )
-  print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(tmp_val_acc, tmp_test_acc,
+    gc.collect()
+    torch.cuda.empty_cache()
+  print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best inlabel_r {:03f}, between_r {:03f}'.format(val_acc, 
+                                                                                                     test_acc,
                                                                                                      best_epoch,
-                                                                                                     best_time))
+                                                                                                     best_label_r,
+                                                                                                     best_between_r))
   wandb.log(
       {
           'best_epoch' : best_epoch,
-          'best_val' : tmp_val_acc,
-          'best_test' : tmp_test_acc
+          'best_val' : val_acc,
+          'best_test' : test_acc,
+          'best_label_r': best_label_r,
+          'best_between_r': best_between_r,
       }
            )
   return train_acc, val_acc, test_acc
@@ -310,13 +399,13 @@ if __name__ == '__main__':
 
 
   ### discritized param
-  parser.add_argument('--depth', type=int, default=50, help='Default depth of the network')
-  parser.add_argument('--trunc_alpha', type=float, default=2.0, help='Default power of trunc function')
-  parser.add_argument('--trunc_coeff', type=float, default=1.0, help='Default power of trunc function')
+  parser.add_argument('--depth', type=int, default=128, help='Default depth of the network')
+  # parser.add_argument('--trunc_alpha', type=float, default=2.0, help='Default power of trunc function')
+  # parser.add_argument('--trunc_coeff', type=float, default=1.0, help='Default power of trunc function')
   parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
   parser.add_argument('--discritize_type', type=str, default="norm", help="norm or acc_norm")
   parser.add_argument('--one_block', action='store_true', help='perform Linear Attention')
-  parser.add_argument('--k', type=float, default=0.0, help='Default power of changing I')
+  parser.add_argument('--coupling_strength', type=float, default=0.0, help='Kuramoto coupling strength')
 
   ################# end of discritized param
   parser.add_argument('--no_alpha_sigmoid', dest='no_alpha_sigmoid', action='store_true',
@@ -335,7 +424,7 @@ if __name__ == '__main__':
                       help='double the length of the feature vector by appending zeros to stabilist ODE learning')
   parser.add_argument('--method', type=str, default='dopri5',
                       help="set the numerical solver: dopri5, euler, rk4, midpoint")
-  parser.add_argument('--step_size', type=float, default=1e-3,
+  parser.add_argument('--step_size', type=float, default=0.01,
                       help='fixed step size when using fixed step solvers e.g. rk4')
   parser.add_argument('--max_iters', type=float, default=100, help='maximum number of integration steps')
   parser.add_argument("--adjoint_method", type=str, default="adaptive_heun",
@@ -444,6 +533,6 @@ if __name__ == '__main__':
   opt = vars(args)
 #   print(opt["attention_type"])
 #   print(opt['epoch'])
-  for _ in range(4):
+  for _ in range(5):
       main(opt)
       opt['run_time'] += 1

@@ -1,3 +1,5 @@
+from ssl import ALERT_DESCRIPTION_DECOMPRESSION_FAILURE
+from tkinter import Variable
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -6,9 +8,10 @@ from base_classes import BaseGNN
 from model_configurations import set_block, set_function
 from utils import DummyData, get_full_adjacency
 from function_transformer_attention import SpGraphTransAttentionLayer
-from torch_geometric.utils import softmax
+from torch_geometric.utils import softmax, get_laplacian, degree
 import torch_sparse
-from torch_geometric.utils.loop import add_remaining_self_loops
+from torch_scatter import scatter_add
+from torch_geometric.utils.loop import add_remaining_self_loops, maybe_num_nodes, remove_self_loops
 import numpy as np
 from data import get_dataset
 from utils import MaxNFEException, squareplus
@@ -21,7 +24,7 @@ class GrandDiscritizedBlock(ODEFunc):
     def __init__(self, in_features, out_features, opt, data, device):
         super(GrandDiscritizedBlock, self).__init__(opt, data, device)
         data = data.data
-        self.trunc_alpha = opt['trunc_alpha']
+        # self.trunc_alpha = opt['trunc_alpha']
         # self.k = opt['k']
         #     self.coeff = opt['trunc_coeff']
 
@@ -82,10 +85,10 @@ class GrandDiscritizedBlock(ODEFunc):
         if self.opt['add_source']:
           f = f + self.beta_train * x
 
-        trunc = torch.norm(x, dim=(-1), keepdim=True)
-        trunc2 = torch.pow(trunc, self.trunc_alpha)
+        # trunc = torch.norm(x, dim=(-1), keepdim=True)
+        # trunc2 = torch.pow(trunc, self.trunc_alpha)
         #     trunc2[torch.abs(trunc) > self.coeff] = self.coeff
-        f = f * trunc2
+        # f = f * trunc2
         return f
 
     def __repr__(self):
@@ -135,6 +138,23 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
   def __init__(self, opt, data, device):
     super().__init__(opt["hidden_dim"], opt, data, device)
     self.discritize_type = opt["discritize_type"]
+    # self.K = nn.Parameter(torch.randn(opt["hidden_dim"]), requires_grad=True)
+    # self.mu = nn.Parameter(torch.randn(opt["hidden_dim"]), requires_grad=True)
+    # self.sigma = nn.Parameter(torch.randn(opt["hidden_dim"]), requires_grad=True)
+    self.mu = nn.Linear(opt["hidden_dim"], opt["hidden_dim"])
+    self.sigma = nn.Linear(opt["hidden_dim"], opt["hidden_dim"])
+    self.K = nn.Linear(opt["hidden_dim"], opt["hidden_dim"])
+    self.K1 = nn.Linear(self.num_features, opt["hidden_dim"])
+    self.K2 = nn.Linear(opt["hidden_dim"], opt["hidden_dim"])
+    self.K3 = nn.Linear(opt["hidden_dim"], opt["hidden_dim"])
+    self.coupling = opt['coupling_strength']
+    self.batch = torch.nn.BatchNorm1d(opt['hidden_dim'])
+    # self.K = nn.Parameter(torch.randn((self.num_nodes,opt["hidden_dim"])), requires_grad=True)
+  def _sampling(self, z_mean, z_log_var):
+    epsilon = torch.randn_like(z_log_var)
+    # epsilon = torch.distributions.cauchy.Cauchy(0,0.05).expand(z_log_var.size()).sample().to(self.device)
+    return z_mean + torch.exp(z_log_var/2)*epsilon
+
   def forward(self,x, pos_encoding=False, debug=False):
 #    print(x.shape, " this is shape before doing anything")
     if self.opt['use_labels']:
@@ -150,6 +170,7 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
     else:
       x = F.dropout(x, self.opt['input_dropout'], training=self.training)
 #       print("after drop", x)
+      inp = x
       x = self.m1(x)
 #     print("After 2",x)
     if self.opt['use_mlp']:
@@ -175,6 +196,46 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
         states = [out]
         diff_values = []
     attention = self.mol_list[0](out) 
+    # mu = self.mu.repeat(out.size(0),1)*0
+    # sigma = self.sigma.repeat(out.size(0),1)
+    # mu = (torch.mean(self.mu(out),dim=0)).repeat(out.size(0),1)
+    # sigma = (torch.mean(self.sigma(out),dim=0)).repeat(out.size(0),1)
+    mu = self.mu(out)
+    # sigma = self.sigma(out)
+    # omega = self._sampling(mu, sigma)
+    # omega = F.dropout(torch.relu(mu),self.opt['dropout'], training=self.training)
+    # omega = F.dropout(omega + self.sigma(omega),self.opt['dropout'], training=self.training)
+    # omega = self.mol_list[0].multiply_attention(omega,attention)
+    # omega = 0
+    laplacian = get_laplacian(self.data_edge_index, normalization="rw")
+    
+    edge_index, _ = remove_self_loops(self.data_edge_index, None)
+    edge_weight = torch.ones(edge_index.size(1), device=self.device)
+    num_nodes = None
+    num_nodes = maybe_num_nodes(edge_index, num_nodes)
+
+    row, col = edge_index[0], edge_index[1]
+    inv_deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
+    inv_deg = (1.0 / (inv_deg)).unsqueeze(-1)
+
+
+    # print(laplacian[1].size())
+    # print(out.size())
+    # omega = torch.sigmoid(omega)
+    # K = torch.relu(torch.mean(self.K(out),dim=0)).unsqueeze(0)
+    # K = torch.relu(self.K(out))
+    K1 = F.dropout(torch.relu(self.K1(inp)), self.opt['dropout'], training=self.training)
+    K2 = F.dropout(torch.relu(K1 + self.K2(K1)), self.opt['dropout'], training=self.training)
+    K = F.dropout(K2 + self.K3(K2), self.opt['dropout'], training=self.training)
+    # att_k = self.mol_list[0](K) 
+    # K = self.mol_list[0].multiply_attention(K,att_k)
+    # print(K.size())
+    # print(omega.max(),omega.min())
+    # ax = self.mol_list[0].multiply_attention(out,attention)
+    omega = torch.clone(out)
+    # index = torch.tensor([i*2*torch.pi/out.size(0) for i in range(out.size(0))]).to(self.device)
+    # out = index.unsqueeze(-1)*torch.ones_like(out)
+    out = torch.zeros_like(out)
     for i in range(self.opt['depth']):
       if self.discritize_type=="norm":
 #         print(torch.norm(out, dim=(-1)).shape)
@@ -210,13 +271,59 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
         if not self.opt['one_block']:
             out = out + self.step_size * self.mol_list[i](out)
         else:
-            ax = self.mol_list[0].multiply_attention(out,attention)
-            ax_t = self.mol_list[0].multiply_attention(out,attention, transpose=True)
-            A_hat_x = ax - 1*out
-            out = out + self.step_size * A_hat_x * (1/2)
+            # sum_sin = torch.sum(torch.sin(out), 0)
+            # sum_cos = torch.sum(torch.cos(out), 0)
+            # cos_sum_sin = torch.cos(out)*sum_sin
+            # sin_sum_cos = torch.sin(out)*sum_cos
+            # sigma_sin = cos_sum_sin - sin_sum_cos
+            # print("out", out.max(), out.min())
+            # print(sigma_sin.max(), sigma_sin.min())
+            # A_hat_x = self.mol_list[0].multiply_attention(sigma_sin,attention)
+            
+            ###### LOCAL ALL-TO-ALL
+            # out = torch.remainder(out, 2*torch.pi)
+            # phi = torch_sparse.spmm(laplacian[0], laplacian[1], out.shape[0], out.shape[0], out)
+            # phi = torch.remainder(-phi+out, 2*torch.pi)
+            cos_R = self.mol_list[0].multiply_attention(torch.cos(out),attention)
+            sin_R = self.mol_list[0].multiply_attention(torch.sin(out),attention)
+            phi = self.mol_list[0].multiply_attention(out,attention)
+            # phi = torch.remainder(phi, 2*torch.pi)
+            # cos_phi = torch.cos(phi)
+            # sin_phi = torch.sin(phi)
+
+            # phi = self.mol_list[0].multiply_attention(out,attention)
+            # phi = torch.remainder(phi, 2*torch.pi)
+            # cos_phi = self.mol_list[0].multiply_attention(torch.cos(out),attention)
+            # sin_phi = self.mol_list[0].multiply_attention(torch.sin(out),attention)
+            R = torch.sqrt(cos_R**2 + sin_R**2)
+            # out_phi = torch.remainder(phi-out, 2*torch.pi)
+            out_phi = phi-out
+            # K = self.mol_list[0].multiply_attention(out,attention)
+            # K = self.K3(K)
+            K = self.coupling
+            out_hat = K*R*torch.sin(out_phi)
+            # omega = self.mol_list[0].multiply_attention(out,attention)
+            # omega = self.K2(omega)
+            out = out + self.step_size * (omega + out_hat)
+            ######
+            
+            # ax = self.mol_list[0].multiply_attention(out,attention)
+            # # ax = torch_sparse.spmm(laplacian[0], laplacian[1], out.shape[0], out.shape[0], out)
+            
+            # # ax_t = self.mol_list[0].multiply_attention(out,attention, transpose=True)
+            # # A_hat_x = (ax + ax_t)
+            # # A_hat_x = torch.remainder(-(ax), 2*torch.pi)
+            # A_hat_x = torch.remainder(ax-out, 2*torch.pi)
+            # # A_hat_x = ax-out
+            # K = 0.2
+            # A_hat_x = K*torch.sin(A_hat_x)
+            # out = out + self.step_size * (omega+(A_hat_x))
+            # # out = out + self.step_size * (ax-out)
+            # # out = self.bn_in(out)
+
         if debug==True:
-            states.append(out)
-            diff_values.append(self.mol_list[0](out))
+            states.append(torch.remainder(out, 2*torch.pi))
+            # diff_values.append(self.mol_list[0](out))
         ####
 
       # elif self.discritize_type == "accumulate_norm":
@@ -241,7 +348,7 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
     # Decode each node embedding to get node label.
     z = self.m2(z)
     if debug==True:
-        return z, states, (attention, self.mol_list[0].edge_index)
+        return z, states, (attention, self.mol_list[0].edge_index, omega)
     return z
 
     #print("")
@@ -253,7 +360,7 @@ class GrandExtendDiscritizedNet(GrandDiscritizedNet):
 if __name__ == "__main__":
   
   print(f"Test the grand_discritized file")
-  opt = {'depth': 5,'use_cora_defaults': False, 'dataset': 'Cora', 'data_norm': 'rw', 'self_loop_weight': 1.0, 'use_labels': False, 'geom_gcn_splits': False, 'num_splits': 1, 'label_rate': 0.5, 'planetoid_split': False, 'hidden_dim': 16, 'fc_out': False, 'input_dropout': 0.5, 'dropout': 0.0, 'batch_norm': False, 'optimizer': 'adam', 'lr': 0.01, 'decay': 0.0005, 'epoch': 100, 'alpha': 1.0, 'alpha_dim': 'sc', 'no_alpha_sigmoid': False, 'beta_dim': 'sc', 'block': 'constant', 'function': 'laplacian', 'use_mlp': False, 'add_source': False, 'cgnn': False, 'time': 1.0, 'augment': False, 'method': None, 'step_size': 1, 'max_iters': 100, 'adjoint_method': 'adaptive_heun', 'adjoint': False, 'adjoint_step_size': 1, 'tol_scale': 1.0, 'tol_scale_adjoint': 1.0, 'ode_blocks': 1, 'max_nfe': 1000, 'no_early': False, 'earlystopxT': 3, 'max_test_steps': 100, 'leaky_relu_slope': 0.2, 'attention_dropout': 0.0, 'heads': 4, 'attention_norm_idx': 0, 'attention_dim': 64, 'mix_features': False, 'reweight_attention': False, 'attention_type': 'scaled_dot', 'square_plus': False, 'jacobian_norm2': None, 'total_deriv': None, 'kinetic_energy': None, 'directional_penalty': None, 'not_lcc': True, 'rewiring': None, 'gdc_method': 'ppr', 'gdc_sparsification': 'topk', 'gdc_k': 64, 'gdc_threshold': 0.0001, 'gdc_avg_degree': 64, 'ppr_alpha': 0.05, 'heat_time': 3.0, 'att_samp_pct': 1, 'use_flux': False, 'exact': False, 'M_nodes': 64, 'new_edges': 'random', 'sparsify': 'S_hat', 'threshold_type': 'topk_adj', 'rw_addD': 0.02, 'rw_rmvR': 0.02, 'rewire_KNN': False, 'rewire_KNN_T': 'T0', 'rewire_KNN_epoch': 5, 'rewire_KNN_k': 64, 'rewire_KNN_sym': False, 'KNN_online': False, 'KNN_online_reps': 4, 'KNN_space': 'pos_distance', 'beltrami': False, 'fa_layer': False, 'pos_enc_type': 'DW64', 'pos_enc_orientation': 'row', 'feat_hidden_dim': 64, 'pos_enc_hidden_dim': 32, 'edge_sampling': False, 'edge_sampling_T': 'T0', 'edge_sampling_epoch': 5, 'edge_sampling_add': 0.64, 'edge_sampling_add_type': 'importance', 'edge_sampling_rmv': 0.32, 'edge_sampling_sym': False, 'edge_sampling_online': False, 'edge_sampling_online_reps': 4, 'edge_sampling_space': 'attention', 'symmetric_attention': False, 'fa_layer_edge_sampling_rmv': 0.8, 'gpu': 0, 'pos_enc_csv': False, 'pos_dist_quantile': 0.001, 'discritize_type': 'norm', 'one_block':False, 'trunc_alpha':0, 'k':1}
+  opt = {'coupling_strength':3,'depth': 5,'use_cora_defaults': False, 'dataset': 'Cora', 'data_norm': 'rw', 'self_loop_weight': 1.0, 'use_labels': False, 'geom_gcn_splits': False, 'num_splits': 1, 'label_rate': 0.5, 'planetoid_split': False, 'hidden_dim': 16, 'fc_out': False, 'input_dropout': 0.5, 'dropout': 0.0, 'batch_norm': False, 'optimizer': 'adam', 'lr': 0.01, 'decay': 0.0005, 'epoch': 100, 'alpha': 1.0, 'alpha_dim': 'sc', 'no_alpha_sigmoid': False, 'beta_dim': 'sc', 'block': 'constant', 'function': 'laplacian', 'use_mlp': False, 'add_source': False, 'cgnn': False, 'time': 1.0, 'augment': False, 'method': None, 'step_size': 1, 'max_iters': 100, 'adjoint_method': 'adaptive_heun', 'adjoint': False, 'adjoint_step_size': 1, 'tol_scale': 1.0, 'tol_scale_adjoint': 1.0, 'ode_blocks': 1, 'max_nfe': 1000, 'no_early': False, 'earlystopxT': 3, 'max_test_steps': 100, 'leaky_relu_slope': 0.2, 'attention_dropout': 0.0, 'heads': 4, 'attention_norm_idx': 0, 'attention_dim': 64, 'mix_features': False, 'reweight_attention': False, 'attention_type': 'scaled_dot', 'square_plus': False, 'jacobian_norm2': None, 'total_deriv': None, 'kinetic_energy': None, 'directional_penalty': None, 'not_lcc': True, 'rewiring': None, 'gdc_method': 'ppr', 'gdc_sparsification': 'topk', 'gdc_k': 64, 'gdc_threshold': 0.0001, 'gdc_avg_degree': 64, 'ppr_alpha': 0.05, 'heat_time': 3.0, 'att_samp_pct': 1, 'use_flux': False, 'exact': False, 'M_nodes': 64, 'new_edges': 'random', 'sparsify': 'S_hat', 'threshold_type': 'topk_adj', 'rw_addD': 0.02, 'rw_rmvR': 0.02, 'rewire_KNN': False, 'rewire_KNN_T': 'T0', 'rewire_KNN_epoch': 5, 'rewire_KNN_k': 64, 'rewire_KNN_sym': False, 'KNN_online': False, 'KNN_online_reps': 4, 'KNN_space': 'pos_distance', 'beltrami': False, 'fa_layer': False, 'pos_enc_type': 'DW64', 'pos_enc_orientation': 'row', 'feat_hidden_dim': 64, 'pos_enc_hidden_dim': 32, 'edge_sampling': False, 'edge_sampling_T': 'T0', 'edge_sampling_epoch': 5, 'edge_sampling_add': 0.64, 'edge_sampling_add_type': 'importance', 'edge_sampling_rmv': 0.32, 'edge_sampling_sym': False, 'edge_sampling_online': False, 'edge_sampling_online_reps': 4, 'edge_sampling_space': 'attention', 'symmetric_attention': False, 'fa_layer_edge_sampling_rmv': 0.8, 'gpu': 0, 'pos_enc_csv': False, 'pos_dist_quantile': 0.001, 'discritize_type': 'norm', 'one_block':True}
   device = "cuda"
   dataset = get_dataset(opt, '../data', False)
   dataset.data = dataset.data.to(device, non_blocking=True)
