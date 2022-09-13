@@ -2,6 +2,7 @@ import argparse
 import numpy as np
 import torch
 import gc
+import os
 import wandb
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
 import torch.nn.functional as F
@@ -203,15 +204,15 @@ def main(cmd_opt):
   group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])
  
   print(wandb_name, group_name, num_run)
-  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
-  wandb.config = opt
+  #wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  #wandb.config = opt
 
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
 
   dataset = get_dataset(opt, '../data', opt['not_lcc'])
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  # device = 'cpu'
+  device = torch.device('cuda:{0}'.format(str(opt['gpu'])) if torch.cuda.is_available() else 'cpu')
+  #device = 'cpu'
   if opt['beltrami']:
     pos_encoding = apply_beltrami(dataset.data, opt).to(device)
     opt['pos_enc_dim'] = pos_encoding.shape[1]
@@ -260,14 +261,14 @@ def main(cmd_opt):
       best_time = model.odeblock.test_integrator.solver.best_time
 
     log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
-    wandb.log(
-       {
-            'train_acc': tmp_train_acc,
-            'test_acc': tmp_test_acc,
-            'val_acc': tmp_val_acc,
-            'loss': loss
-        }
-    )
+    #wandb.log(
+    #   {
+    #        'train_acc': tmp_train_acc,
+    #        'test_acc': tmp_test_acc,
+    #        'val_acc': tmp_val_acc,
+    #        'loss': loss
+    #    }
+    #)
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -276,13 +277,13 @@ def main(cmd_opt):
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
-  wandb.log(
-      {
-          'best_epoch' : best_epoch,
-          'best_val' : val_acc,
-          'best_test' : test_acc,
-      }
-           )
+  #wandb.log(
+  #    {
+  #        'best_epoch' : best_epoch,
+  #        'best_val' : val_acc,
+  #        'best_test' : test_acc,
+  #    }
+  #         )
 
   return train_acc, val_acc, test_acc
 

@@ -46,7 +46,7 @@ class GNN(BaseGNN):
     if self.opt['augment']:
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
-    self.odeblock.set_x0(torch.zeros(x.shape).to(self.device),x)
+    self.odeblock.set_x0(x,x)
 
     if self.training and self.odeblock.nreg > 0:
       z, self.reg_states = self.odeblock(x)

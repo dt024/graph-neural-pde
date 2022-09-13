@@ -51,14 +51,15 @@ class LaplacianODEFunc(ODEFunc):
     else:
       alpha = self.alpha_train
 
-    # f = alpha * (ax - x)
     ###KuGraph
     R = torch.sqrt(cos_R**2 + sin_R**2)
     out_phi = phi-x
     out_hat = self.K*R*(out_phi)
     f = self.omega + out_hat
-    # if self.opt['add_source']:
-    #   f = f + self.beta_train * self.x0
+    f = alpha*f
+    #f = alpha * (ax - x)
+    if self.opt['add_source']:
+      f = f + self.beta_train * self.x0
     return f
 
 
