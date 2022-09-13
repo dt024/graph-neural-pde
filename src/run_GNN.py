@@ -1,6 +1,8 @@
 import argparse
 import numpy as np
 import torch
+import gc
+import wandb
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
 import torch.nn.functional as F
 from GNN import GNN
@@ -63,7 +65,11 @@ def train(model, optimizer, data, pos_encoding=None):
   else:
     train_pred_idx = data.train_mask
 
-  out = model(feat, pos_encoding)
+  out, omega = model(feat, pos_encoding)
+  # omega_norm = 0
+  # for i in range(omega.size(0)):
+  #   for j in range(i+1, omega.size(0)):
+  #     omega_norm += torch.norm(omega[i]-omega[j])
 
   if model.opt['dataset'] == 'ogbn-arxiv':
     lf = torch.nn.functional.nll_loss
@@ -86,6 +92,7 @@ def train(model, optimizer, data, pos_encoding=None):
   optimizer.step()
   model.bm.update(model.getNFE())
   model.resetNFE()
+  torch.cuda.empty_cache()
   return loss.item()
 
 
@@ -101,8 +108,12 @@ def train_OGB(model, mp, optimizer, data, pos_encoding=None):
     train_pred_idx = data.train_mask
 
   pos_encoding = mp(pos_encoding).to(model.device)
-  out = model(feat, pos_encoding)
-
+  out, omega = model(feat, pos_encoding)
+  omega_norm = 0
+  for i in range(omega.size(0)):
+    for j in range(i+1, omega.size(0)):
+      omega_norm += torch.norm(omega[i]-omega[j])
+  
   if model.opt['dataset'] == 'ogbn-arxiv':
     lf = torch.nn.functional.nll_loss
     loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask])
@@ -133,7 +144,8 @@ def test(model, data, pos_encoding=None, opt=None):  # opt required for runtime 
   feat = data.x
   if model.opt['use_labels']:
     feat = add_labels(feat, data.y, data.train_mask, model.num_classes, model.device)
-  logits, accs = model(feat, pos_encoding), []
+  logits = model(feat, pos_encoding)[0]
+  accs = []
   for _, mask in data('train_mask', 'val_mask', 'test_mask'):
     pred = logits[mask].max(1)[1]
     acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
@@ -183,13 +195,23 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt, **best_opt}
+  opt['time'] = cmd_opt['time']
+  opt['step_size'] = cmd_opt['step_size']
+  opt['method'] = cmd_opt['method']
+  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']} step: {opt['step_size']}"
+  num_run = f"run-time: {opt['run_time']}"
+  group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])
+ 
+  print(wandb_name, group_name, num_run)
+  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  wandb.config = opt
 
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
 
   dataset = get_dataset(opt, '../data', opt['not_lcc'])
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+  # device = 'cpu'
   if opt['beltrami']:
     pos_encoding = apply_beltrami(dataset.data, opt).to(device)
     opt['pos_enc_dim'] = pos_encoding.shape[1]
@@ -202,7 +224,7 @@ def main(cmd_opt):
     model = GNN(opt, dataset, device).to(device) if opt["no_early"] else GNNEarly(opt, dataset, device).to(device)
 
   if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
-    dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500)
+    dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500,num_per_class=opt['split_rate'])
 
   data = dataset.data.to(device)
 
@@ -238,11 +260,30 @@ def main(cmd_opt):
       best_time = model.odeblock.test_integrator.solver.best_time
 
     log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
+    wandb.log(
+       {
+            'train_acc': tmp_train_acc,
+            'test_acc': tmp_test_acc,
+            'val_acc': tmp_val_acc,
+            'loss': loss
+        }
+    )
 
-    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, train_acc, val_acc, test_acc, best_time))
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print(log.format(epoch, time.time() - start_time, loss, model.fm.val, model.bm.val, train_acc, val_acc, test_acc, best_time))
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
+  wandb.log(
+      {
+          'best_epoch' : best_epoch,
+          'best_val' : val_acc,
+          'best_test' : test_acc,
+      }
+           )
+
   return train_acc, val_acc, test_acc
 
 
@@ -250,6 +291,11 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--use_cora_defaults', action='store_true',
                       help='Whether to run with best params for cora. Overrides the choice of dataset')
+  # KuGraph args
+  parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
+  parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
+  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')  
+
   # data args
   parser.add_argument('--dataset', type=str, default='Cora',
                       help='Cora, Citeseer, Pubmed, Computers, Photo, CoauthorCS, ogbn-arxiv')
@@ -399,4 +445,5 @@ if __name__ == '__main__':
 
   opt = vars(args)
 
+  opt['is_webKB'] = False
   main(opt)

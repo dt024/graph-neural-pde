@@ -73,7 +73,7 @@ class GNNEarly(BaseGNN):
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
 
-    self.odeblock.set_x0(x)
+    self.odeblock.set_x0(torch.zeros(x.shape).to(self.device), x)
 
     with torch.no_grad():
       self.set_solver_m2()
@@ -98,7 +98,7 @@ class GNNEarly(BaseGNN):
 
     # Decode each node embedding to get node label.
     z = self.m2(z)
-    return z
+    return z, x
 
   def forward_encoder(self, x, pos_encoding):
     if self.opt['use_labels']:

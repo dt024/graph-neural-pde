@@ -49,8 +49,9 @@ class ODEblock(nn.Module):
     self.test_integrator = None
     self.set_tol()
 
-  def set_x0(self, x0):
+  def set_x0(self, x0, omega):
     self.odefunc.x0 = x0.clone().detach()
+    self.odefunc.omega = omega.clone().detach()
     self.reg_odefunc.odefunc.x0 = x0.clone().detach()
 
   def set_tol(self):
@@ -87,6 +88,7 @@ class ODEFunc(MessagePassing):
     self.alpha_train = nn.Parameter(torch.tensor(0.0))
     self.beta_train = nn.Parameter(torch.tensor(0.0))
     self.x0 = None
+    self.omega = None
     self.nfe = 0
     self.alpha_sc = nn.Parameter(torch.ones(1))
     self.beta_sc = nn.Parameter(torch.ones(1))
@@ -100,9 +102,14 @@ class BaseGNN(MessagePassing):
     super(BaseGNN, self).__init__()
     self.opt = opt
     self.T = opt['time']
-    self.num_classes = dataset.num_classes
-    self.num_features = dataset.data.num_features
-    self.num_nodes = dataset.data.num_nodes
+    if not opt['is_webKB']:
+      self.num_classes = dataset.num_classes
+      self.num_features = dataset.data.num_features
+      self.num_nodes = dataset.data.num_nodes
+    else:
+      self.num_classes = 5
+      self.num_features = dataset.num_features
+      self.num_nodes = dataset.num_nodes
     self.device = device
     self.fm = Meter()
     self.bm = Meter()
@@ -121,12 +128,12 @@ class BaseGNN(MessagePassing):
       self.m12 = nn.Linear(opt['hidden_dim'], opt['hidden_dim'])
     if opt['use_labels']:
       # todo - fastest way to propagate this everywhere, but error prone - refactor later
-      opt['hidden_dim'] = opt['hidden_dim'] + dataset.num_classes
+      opt['hidden_dim'] = opt['hidden_dim'] + self.num_classes
     else:
       self.hidden_dim = opt['hidden_dim']
     if opt['fc_out']:
       self.fc = nn.Linear(opt['hidden_dim'], opt['hidden_dim'])
-    self.m2 = nn.Linear(opt['hidden_dim'], dataset.num_classes)
+    self.m2 = nn.Linear(opt['hidden_dim'], self.num_classes)
     if self.opt['batch_norm']:
       self.bn_in = torch.nn.BatchNorm1d(opt['hidden_dim'])
       self.bn_out = torch.nn.BatchNorm1d(opt['hidden_dim'])
