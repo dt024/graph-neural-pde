@@ -54,7 +54,7 @@ class LaplacianODEFunc(ODEFunc):
     ###KuGraph
     R = torch.sqrt(cos_R**2 + sin_R**2)
     out_phi = phi-x
-    out_hat = self.K*R*(out_phi)
+    out_hat = self.K*R*torch.sin(out_phi)
     f = self.omega + out_hat
     f = alpha*f
     #f = alpha * (ax - x)

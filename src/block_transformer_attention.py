@@ -42,8 +42,8 @@ class AttODEblock(ODEblock):
     reg_states = tuple(torch.zeros(x.size(0)).to(x) for i in range(self.nreg))
 
     func = self.reg_odefunc if self.training and self.nreg > 0 else self.odefunc
-    state = (self.odefunc.x0,) + reg_states if self.training and self.nreg > 0 else x
-
+    state = (x,) + reg_states if self.training and self.nreg > 0 else x
+    
     if self.opt["adjoint"] and self.training:
       state_dt = integrator(
         func, state, t,

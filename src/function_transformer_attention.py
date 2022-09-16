@@ -21,6 +21,7 @@ class ODEFuncTransformerAtt(ODEFunc):
       self.edge_index, self.edge_weight = data.edge_index, data.edge_attr
     self.multihead_att_layer = SpGraphTransAttentionLayer(in_features, out_features, opt,
                                                           device, edge_weights=self.edge_weight).to(device)
+    self.K = opt['coupling_strength']
 
   def multiply_attention(self, x, attention, v=None):
     # todo would be nice if this was more efficient
@@ -32,8 +33,12 @@ class ODEFuncTransformerAtt(ODEFunc):
       ax = self.multihead_att_layer.Wout(vx)
     else:
       mean_attention = attention.mean(dim=1)
-      ax = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
-    return ax
+      #ax = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
+      cos_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.cos(x))
+      sin_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.sin(x))
+      phi = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
+
+    return phi, cos_R, sin_R
 
   def forward(self, t, x):  # t is needed when called by the integrator
     if self.nfe > self.opt["max_nfe"]:
@@ -41,13 +46,19 @@ class ODEFuncTransformerAtt(ODEFunc):
 
     self.nfe += 1
     attention, values = self.multihead_att_layer(x, self.edge_index)
-    ax = self.multiply_attention(x, attention, values)
+    #ax = self.multiply_attention(x, attention, values)
+    phi,cos_R,sin_R = self.multiply_attention(x, attention, values)
 
     if not self.opt['no_alpha_sigmoid']:
       alpha = torch.sigmoid(self.alpha_train)
     else:
       alpha = self.alpha_train
-    f = alpha * (ax - x)
+    #f = alpha * (ax - x)
+    R = torch.sqrt(cos_R**2 + sin_R**2)
+    out_phi = phi-x
+    out_hat = self.K*R*torch.sin(out_phi)
+    f = self.omega + out_hat
+
     if self.opt['add_source']:
       f = f + self.beta_train * self.x0
     return f

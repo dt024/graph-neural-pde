@@ -174,7 +174,7 @@ def test_OGB(model, data, pos_encoding, opt):
   evaluator = Evaluator(name=name)
   model.eval()
 
-  out = model(feat, pos_encoding).log_softmax(dim=-1)
+  out = model(feat, pos_encoding)[0].log_softmax(dim=-1)
   y_pred = out.argmax(dim=-1, keepdim=True)
 
   train_acc = evaluator.eval({
@@ -199,20 +199,25 @@ def main(cmd_opt):
   opt['time'] = cmd_opt['time']
   opt['step_size'] = cmd_opt['step_size']
   opt['method'] = cmd_opt['method']
-  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']} step: {opt['step_size']}"
+  if cmd_opt['function']=='transformer':
+      opt['function']=cmd_opt['function']
+  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']}"
   num_run = f"run-time: {opt['run_time']}"
-  group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])
+  group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
  
   print(wandb_name, group_name, num_run)
-  #wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
-  #wandb.config = opt
+  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  wandb.config = opt
 
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
 
   dataset = get_dataset(opt, '../data', opt['not_lcc'])
-  device = torch.device('cuda:{0}'.format(str(opt['gpu'])) if torch.cuda.is_available() else 'cpu')
-  #device = 'cpu'
+  
+  if opt['gpu'] == -1:
+    device = 'cpu'
+  else:
+    device = torch.device('cuda:{0}'.format(str(opt['gpu'])) if torch.cuda.is_available() else 'cpu')
   if opt['beltrami']:
     pos_encoding = apply_beltrami(dataset.data, opt).to(device)
     opt['pos_enc_dim'] = pos_encoding.shape[1]
@@ -261,29 +266,29 @@ def main(cmd_opt):
       best_time = model.odeblock.test_integrator.solver.best_time
 
     log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
-    #wandb.log(
-    #   {
-    #        'train_acc': tmp_train_acc,
-    #        'test_acc': tmp_test_acc,
-    #        'val_acc': tmp_val_acc,
-    #        'loss': loss
-    #    }
-    #)
+    wandb.log(
+       {
+            'train_acc': tmp_train_acc,
+            'test_acc': tmp_test_acc,
+            'val_acc': tmp_val_acc,
+            'loss': loss
+        }
+    )
 
     gc.collect()
     torch.cuda.empty_cache()
 
-    print(log.format(epoch, time.time() - start_time, loss, model.fm.val, model.bm.val, train_acc, val_acc, test_acc, best_time))
+    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, train_acc, val_acc, test_acc, best_time))
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
-  #wandb.log(
-  #    {
-  #        'best_epoch' : best_epoch,
-  #        'best_val' : val_acc,
-  #        'best_test' : test_acc,
-  #    }
-  #         )
+  wandb.log(
+      {
+          'best_epoch' : best_epoch,
+          'best_val' : val_acc,
+          'best_test' : test_acc,
+      }
+           )
 
   return train_acc, val_acc, test_acc
 
