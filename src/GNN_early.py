@@ -73,7 +73,7 @@ class GNNEarly(BaseGNN):
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
 
-    self.odeblock.set_x0(torch.zeros(x.shape).to(self.device), x)
+    self.odeblock.set_x0(x, x)
 
     with torch.no_grad():
       self.set_solver_m2()

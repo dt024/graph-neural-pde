@@ -201,6 +201,9 @@ def main(cmd_opt):
   opt['method'] = cmd_opt['method']
   if cmd_opt['function']=='transformer':
       opt['function']=cmd_opt['function']
+  if cmd_opt['block']=='constant':
+      opt['block']=cmd_opt['block']
+      
   wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']}"
   num_run = f"run-time: {opt['run_time']}"
   group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']

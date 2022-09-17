@@ -47,7 +47,7 @@ class ODEFuncTransformerAtt(ODEFunc):
     self.nfe += 1
     attention, values = self.multihead_att_layer(x, self.edge_index)
     #ax = self.multiply_attention(x, attention, values)
-    phi,cos_R,sin_R = self.multiply_attention(x, attention, values)
+    phi, cos_R, sin_R = self.multiply_attention(x, attention, values)
 
     if not self.opt['no_alpha_sigmoid']:
       alpha = torch.sigmoid(self.alpha_train)
@@ -58,7 +58,7 @@ class ODEFuncTransformerAtt(ODEFunc):
     out_phi = phi-x
     out_hat = self.K*R*torch.sin(out_phi)
     f = self.omega + out_hat
-
+    #f = out_hat
     if self.opt['add_source']:
       f = f + self.beta_train * self.x0
     return f
