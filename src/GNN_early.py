@@ -72,7 +72,8 @@ class GNNEarly(BaseGNN):
     if self.opt['augment']:
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
-
+    if self.opt['kuramoto'] == 1:
+      x = torch.clamp(x, min=0, max=torch.pi)
     self.odeblock.set_x0(x, x)
 
     with torch.no_grad():

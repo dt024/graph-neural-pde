@@ -90,6 +90,7 @@ def train(model, optimizer, data, pos_encoding=None):
   model.fm.update(model.getNFE())
   model.resetNFE()
   loss.backward()
+  torch.nn.utils.clip_grad_norm_(model.parameters(),5)
   optimizer.step()
   model.bm.update(model.getNFE())
   model.resetNFE()
@@ -196,21 +197,35 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt, **best_opt}
-  opt['time'] = cmd_opt['time']
-  opt['step_size'] = cmd_opt['step_size']
-  opt['method'] = cmd_opt['method']
-  if cmd_opt['function']=='transformer':
-      opt['function']=cmd_opt['function']
-  if cmd_opt['block']=='constant':
-      opt['block']=cmd_opt['block']
+  if opt['kuramoto']==1:
+    opt['time'] = cmd_opt['time']
+    # opt['step_size'] = cmd_opt['step_size']
+    opt['method'] = cmd_opt['method']
+    opt['add_source'] = False
+    # if cmd_opt['function']=='transformer':
+    #     opt['function']=cmd_opt['function']
+    # if cmd_opt['block']=='constant':
+    #     opt['block']=cmd_opt['block']
+  else:
+    opt['time'] = cmd_opt['time']
+    # opt['step_size'] = cmd_opt['step_size']
+    # opt['method'] = cmd_opt['method']
+
       
-  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']}"
+  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']} newdim"
   num_run = f"run-time: {opt['run_time']}"
-  group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
+  group_name = ''
+  if opt['add_noise']==1:
+    group_name = 'Noisy'
+  if opt['kuramoto']==1:
+    group_name += 'Kuramoto_'
+  else:
+    group_name += 'GRAND_'
+  group_name += opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
  
   print(wandb_name, group_name, num_run)
-  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
-  wandb.config = opt
+  # wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  # wandb.config = opt
 
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
@@ -234,7 +249,8 @@ def main(cmd_opt):
 
   if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
     dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500,num_per_class=opt['split_rate'])
-
+  if opt['add_noise']==1:
+    dataset.data.x += torch.rand_like(dataset.data.x)
   data = dataset.data.to(device)
 
   parameters = [p for p in model.parameters() if p.requires_grad]
@@ -269,29 +285,29 @@ def main(cmd_opt):
       best_time = model.odeblock.test_integrator.solver.best_time
 
     log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
-    wandb.log(
-       {
-            'train_acc': tmp_train_acc,
-            'test_acc': tmp_test_acc,
-            'val_acc': tmp_val_acc,
-            'loss': loss
-        }
-    )
+    # wandb.log(
+    #    {
+    #         'train_acc': tmp_train_acc,
+    #         'test_acc': tmp_test_acc,
+    #         'val_acc': tmp_val_acc,
+    #         'loss': loss
+    #     }
+    # )
 
     gc.collect()
     torch.cuda.empty_cache()
 
-    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, train_acc, val_acc, test_acc, best_time))
+    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, tmp_train_acc, tmp_val_acc, tmp_test_acc, best_time))
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
-  wandb.log(
-      {
-          'best_epoch' : best_epoch,
-          'best_val' : val_acc,
-          'best_test' : test_acc,
-      }
-           )
+  # wandb.log(
+  #     {
+  #         'best_epoch' : best_epoch,
+  #         'best_val' : val_acc,
+  #         'best_test' : test_acc,
+  #     }
+  #          )
 
   return train_acc, val_acc, test_acc
 
@@ -303,7 +319,9 @@ if __name__ == '__main__':
   # KuGraph args
   parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
   parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
-  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')  
+  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')
+  parser.add_argument('--kuramoto', type=int, default=0, help='The current number of runs')  
+  parser.add_argument('--add_noise', type=int, default=0, help='The current number of runs')
 
   # data args
   parser.add_argument('--dataset', type=str, default='Cora',

@@ -25,39 +25,50 @@ class LaplacianODEFunc(ODEFunc):
     self.alpha_sc = nn.Parameter(torch.ones(1))
     self.beta_sc = nn.Parameter(torch.ones(1))
     self.K = opt['coupling_strength']
-    
+    self.kuramoto = opt['kuramoto']
   def sparse_multiply(self, x):
     if self.opt['block'] in ['attention']:  # adj is a multihead attention
       mean_attention = self.attention_weights.mean(dim=1)
-      # ax = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
-      cos_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.cos(x))
-      sin_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.sin(x))
-      phi = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
+      if self.kuramoto == 0:
+        ax = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
+      else:
+        cos_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.cos(x))
+        sin_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.sin(x))
+        phi = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
     elif self.opt['block'] in ['mixed', 'hard_attention']:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.attention_weights, x.shape[0], x.shape[0], x)
     else:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
-    return phi, cos_R, sin_R
+    if self.kuramoto==1:
+      return phi, cos_R, sin_R
+    else:
+      return ax
 
   def forward(self, t, x):  # the t param is needed by the ODE solver.
     if self.nfe > self.opt["max_nfe"]:
       raise MaxNFEException
     self.nfe += 1
-    # ax = self.sparse_multiply(x)
+    if self.kuramoto==0:
+      ax = self.sparse_multiply(x)
+    else:
     ### KuGraph
-    phi, cos_R, sin_R = self.sparse_multiply(x)
+      phi, cos_R, sin_R = self.sparse_multiply(x)
     if not self.opt['no_alpha_sigmoid']:
       alpha = torch.sigmoid(self.alpha_train)
     else:
       alpha = self.alpha_train
 
     ###KuGraph
-    R = torch.sqrt(cos_R**2 + sin_R**2)
-    out_phi = phi-x
-    out_hat = self.K*R*torch.sin(out_phi)
-    f = self.omega + out_hat
-    f = alpha*f
-    #f = alpha * (ax - x)
+    if self.kuramoto==1:
+      R = torch.sqrt(cos_R**2 + sin_R**2)
+      out_phi = phi-x
+      out_hat = self.K*R*torch.sin(out_phi)
+      f = self.omega + out_hat
+      f = f
+      return f
+    else:
+      # return (ax - x)
+      f = alpha * (ax - x)
     if self.opt['add_source']:
       f = f + self.beta_train * self.x0
     return f
