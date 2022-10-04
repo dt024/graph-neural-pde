@@ -46,6 +46,9 @@ class GNN(BaseGNN):
     if self.opt['augment']:
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
+    if self.opt['kuramoto']:
+        x = torch.clamp(x, min=0,max=torch.pi)
+    #x = x - torch.mean(x,dim=0)
     self.odeblock.set_x0(x,x)
     
     if self.training and self.odeblock.nreg > 0:

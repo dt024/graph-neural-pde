@@ -112,6 +112,10 @@ class SpGraphTransAttentionLayer(nn.Module):
       self.init_weights(self.Kp)
 
     else:
+      if self.opt['attention_type'] == "exp_kernel":
+        self.output_var = nn.Parameter(torch.ones(1))
+        self.lengthscale = nn.Parameter(torch.ones(1))
+
       self.Q = nn.Linear(in_features, self.attention_dim)
       self.init_weights(self.Q)
 
@@ -196,7 +200,9 @@ class SpGraphTransAttentionLayer(nn.Module):
 
       src = q[edge[0, :], :, :]
       dst_k = k[edge[1, :], :, :]
-    if self.opt['attention_type'] == "scaled_dot":
+    if not self.opt['beltrami'] and self.opt['attention_type'] == "exp_kernel":
+      prods = self.output_var ** 2 * torch.exp(-(torch.sum((src - dst_k) ** 2, dim=1) / (2 * self.lengthscale ** 2)))
+    elif self.opt['attention_type'] == "scaled_dot":
       prods = torch.sum(src * dst_k, dim=1) / np.sqrt(self.d_k)
 
     elif self.opt['attention_type'] == "cosine_sim":

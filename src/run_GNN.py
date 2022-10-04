@@ -15,7 +15,7 @@ from data import get_dataset, set_train_val_test_split
 from ogb.nodeproppred import Evaluator
 from graph_rewiring import apply_KNN, apply_beltrami, apply_edge_sampling
 from best_params import  best_params_dict
-
+os.environ['WANDB_API_KEY']='1054d86683ce3a1445a1fb9b11fb88a9f3ada7fd'
 
 def get_optimizer(name, parameters, lr, weight_decay=0):
   if name == 'sgd':
@@ -90,6 +90,7 @@ def train(model, optimizer, data, pos_encoding=None):
   model.fm.update(model.getNFE())
   model.resetNFE()
   loss.backward()
+  torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
   optimizer.step()
   model.bm.update(model.getNFE())
   model.resetNFE()
@@ -196,17 +197,25 @@ def test_OGB(model, data, pos_encoding, opt):
 def main(cmd_opt):
   best_opt = best_params_dict[cmd_opt['dataset']]
   opt = {**cmd_opt, **best_opt}
-  opt['time'] = cmd_opt['time']
-  opt['step_size'] = cmd_opt['step_size']
-  opt['method'] = cmd_opt['method']
-  if cmd_opt['function']=='transformer':
-      opt['function']=cmd_opt['function']
-  if cmd_opt['block']=='constant':
-      opt['block']=cmd_opt['block']
-      
-  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']}"
+  if opt['kuramoto']==True:
+      opt['time'] = cmd_opt['time']
+      #opt['step_size'] = cmd_opt['step_size']
+      opt['method'] = cmd_opt['method']
+      #opt['hidden_dim'] = cmd_opt['hidden_dim']
+      #if cmd_opt['function']=='transformer':
+          #opt['function']=cmd_opt['function']
+  else:
+  #    opt['method']='euler'
+      opt['time']=cmd_opt['time']
+  #    opt['step_size'] = 0.1
+    
+  wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']} hidden: {opt['hidden_dim']}"
   num_run = f"run-time: {opt['run_time']}"
-  group_name = 'Kuramoto_' + opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
+  if opt['kuramoto']==True:
+      group_name = 'NoisyKuramoto_'
+  else:
+      group_name = 'NoisyGRAND_'
+  group_name = group_name + opt['dataset'] + '_' + opt['method'] #+ '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
  
   print(wandb_name, group_name, num_run)
   wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
@@ -234,7 +243,9 @@ def main(cmd_opt):
 
   if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
     dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500,num_per_class=opt['split_rate'])
-
+  
+  if opt['add_noise']==1:
+      dataset.data.x = dataset.data.x + torch.randn_like(dataset.data.x)
   data = dataset.data.to(device)
 
   parameters = [p for p in model.parameters() if p.requires_grad]
@@ -252,6 +263,10 @@ def main(cmd_opt):
       model.odeblock.odefunc.edge_index = ei
 
     loss = train(model, optimizer, data, pos_encoding)
+    #print('------------DONE TRAIN-------------')
+    #for p in model.parameters():
+    #    if p.requires_grad:
+    #        print(p.name,p.data)
     tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
     best_time = opt['time']
@@ -281,7 +296,7 @@ def main(cmd_opt):
     gc.collect()
     torch.cuda.empty_cache()
 
-    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, train_acc, val_acc, test_acc, best_time))
+    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, tmp_train_acc, tmp_val_acc, tmp_test_acc, best_time))
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
@@ -304,6 +319,8 @@ if __name__ == '__main__':
   parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
   parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
   parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')  
+  parser.add_argument('--kuramoto', type=int, default=0, help='The current number of runs') 
+  parser.add_argument('--add_noise', type=int, default=0, help='The current number of runs')
 
   # data args
   parser.add_argument('--dataset', type=str, default='Cora',
@@ -455,4 +472,8 @@ if __name__ == '__main__':
   opt = vars(args)
 
   opt['is_webKB'] = False
+  if opt['kuramoto']==0:
+     opt['kuramoto'] = False
+  else:
+     opt['kuramoto'] = True
   main(opt)

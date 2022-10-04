@@ -64,7 +64,6 @@ class GNNEarly(BaseGNN):
 
     if self.opt['use_labels']:
       x = torch.cat([x, y], dim=-1)
-
     if self.opt['batch_norm']:
       x = self.bn_in(x)
 
@@ -72,7 +71,11 @@ class GNNEarly(BaseGNN):
     if self.opt['augment']:
       c_aux = torch.zeros(x.shape).to(self.device)
       x = torch.cat([x, c_aux], dim=1)
-
+    if self.opt['kuramoto']:
+        #x = (x-x.min())/x.max()*torch.pi
+        x = torch.clamp(x,min=0,max=torch.pi)
+        #x = x - torch.mean(x)
+    #x = x - torch.mean(x,dim=0)
     self.odeblock.set_x0(x, x)
 
     with torch.no_grad():
