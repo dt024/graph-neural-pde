@@ -64,7 +64,6 @@ class GNNEarly(BaseGNN):
 
     if self.opt['use_labels']:
       x = torch.cat([x, y], dim=-1)
-
     if self.opt['batch_norm']:
       x = self.bn_in(x)
 

@@ -15,7 +15,7 @@ from data import get_dataset, set_train_val_test_split
 from ogb.nodeproppred import Evaluator
 from graph_rewiring import apply_KNN, apply_beltrami, apply_edge_sampling
 from best_params import  best_params_dict
-
+os.environ['WANDB_API_KEY']='1054d86683ce3a1445a1fb9b11fb88a9f3ada7fd'
 
 def get_optimizer(name, parameters, lr, weight_decay=0):
   if name == 'sgd':
@@ -90,7 +90,7 @@ def train(model, optimizer, data, pos_encoding=None):
   model.fm.update(model.getNFE())
   model.resetNFE()
   loss.backward()
-  torch.nn.utils.clip_grad_norm_(model.parameters(),5)
+  torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
   optimizer.step()
   model.bm.update(model.getNFE())
   model.resetNFE()
@@ -199,7 +199,7 @@ def main(cmd_opt):
   opt = {**cmd_opt, **best_opt}
   if opt['kuramoto']==1:
     opt['time'] = cmd_opt['time']
-    # opt['step_size'] = cmd_opt['step_size']
+    opt['step_size'] = cmd_opt['step_size']
     opt['method'] = cmd_opt['method']
     opt['add_source'] = False
     # if cmd_opt['function']=='transformer':
@@ -222,10 +222,11 @@ def main(cmd_opt):
   else:
     group_name += 'GRAND_'
   group_name += opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
- 
+     
   print(wandb_name, group_name, num_run)
-  # wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
-  # wandb.config = opt
+  if opt['logging']==1:
+    wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+    wandb.config = opt
 
   if cmd_opt['beltrami']:
     opt['beltrami'] = True
@@ -250,7 +251,8 @@ def main(cmd_opt):
   if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
     dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500,num_per_class=opt['split_rate'])
   if opt['add_noise']==1:
-    dataset.data.x += torch.rand_like(dataset.data.x)
+      dataset.data.x = dataset.data.x + torch.randn_like(dataset.data.x)
+
   data = dataset.data.to(device)
 
   parameters = [p for p in model.parameters() if p.requires_grad]
@@ -268,6 +270,10 @@ def main(cmd_opt):
       model.odeblock.odefunc.edge_index = ei
 
     loss = train(model, optimizer, data, pos_encoding)
+    #print('------------DONE TRAIN-------------')
+    #for p in model.parameters():
+    #    if p.requires_grad:
+    #        print(p.name,p.data)
     tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
     best_time = opt['time']
@@ -285,14 +291,15 @@ def main(cmd_opt):
       best_time = model.odeblock.test_integrator.solver.best_time
 
     log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Best time: {:.4f}'
-    # wandb.log(
-    #    {
-    #         'train_acc': tmp_train_acc,
-    #         'test_acc': tmp_test_acc,
-    #         'val_acc': tmp_val_acc,
-    #         'loss': loss
-    #     }
-    # )
+    if opt['logging']==1:
+      wandb.log(
+        {
+              'train_acc': tmp_train_acc,
+              'test_acc': tmp_test_acc,
+              'val_acc': tmp_val_acc,
+              'loss': loss
+          }
+      )
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -301,13 +308,14 @@ def main(cmd_opt):
   print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
                                                                                                      best_epoch,
                                                                                                      best_time))
-  # wandb.log(
-  #     {
-  #         'best_epoch' : best_epoch,
-  #         'best_val' : val_acc,
-  #         'best_test' : test_acc,
-  #     }
-  #          )
+  if opt['logging']==1:
+    wandb.log(
+        {
+            'best_epoch' : best_epoch,
+            'best_val' : val_acc,
+            'best_test' : test_acc,
+        }
+            )
 
   return train_acc, val_acc, test_acc
 
@@ -319,9 +327,11 @@ if __name__ == '__main__':
   # KuGraph args
   parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
   parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
-  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')
-  parser.add_argument('--kuramoto', type=int, default=0, help='The current number of runs')  
+  
+  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')  
+  parser.add_argument('--kuramoto', type=int, default=0, help='The current number of runs') 
   parser.add_argument('--add_noise', type=int, default=0, help='The current number of runs')
+  parser.add_argument('--logging', type=int, default=1, help='The current number of runs')
 
   # data args
   parser.add_argument('--dataset', type=str, default='Cora',

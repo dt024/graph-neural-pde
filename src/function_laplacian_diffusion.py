@@ -35,14 +35,12 @@ class LaplacianODEFunc(ODEFunc):
         cos_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.cos(x))
         sin_R = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], torch.sin(x))
         phi = torch_sparse.spmm(self.edge_index, mean_attention, x.shape[0], x.shape[0], x)
+        return phi, cos_R, sin_R
     elif self.opt['block'] in ['mixed', 'hard_attention']:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.attention_weights, x.shape[0], x.shape[0], x)
     else:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
-    if self.kuramoto==1:
-      return phi, cos_R, sin_R
-    else:
-      return ax
+    return ax
 
   def forward(self, t, x):  # the t param is needed by the ODE solver.
     if self.nfe > self.opt["max_nfe"]:
