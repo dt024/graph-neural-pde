@@ -1,22 +1,23 @@
 import argparse
+from distutils.log import debug
+from statistics import mean
+import gc
 import numpy as np
 import torch
-import gc
-import os
-import wandb
 from torch_geometric.nn import GCNConv, ChebConv  # noqa
 import torch.nn.functional as F
-from GNN import GNN
-from GNN_early import GNNEarly
-from GNN_KNN import GNN_KNN
-from GNN_KNN_early import GNNKNNEarly
 import time
-from data import get_dataset, set_train_val_test_split
+import tqdm
 from data_heterophilic import get_data
 from ogb.nodeproppred import Evaluator
 from graph_rewiring import apply_KNN, apply_beltrami, apply_edge_sampling
 from best_params import  best_params_dict
-os.environ['WANDB_API_KEY']='1054d86683ce3a1445a1fb9b11fb88a9f3ada7fd'
+from grand_discritized import GrandExtendDiscritizedNet
+
+
+import wandb
+
+
 
 def get_optimizer(name, parameters, lr, weight_decay=0):
   if name == 'sgd':
@@ -62,41 +63,73 @@ def train(model, optimizer, data, pos_encoding=None):
   feat = data.x
   if model.opt['use_labels']:
     train_label_idx, train_pred_idx = get_label_masks(data, model.opt['label_rate'])
-
     feat = add_labels(feat, data.y, train_label_idx, model.num_classes, model.device)
   else:
     train_pred_idx = data.train_mask
+  train_label = data.y.squeeze()[data.train_mask]
+  out, label_r, all_r = model(feat, pos_encoding=False, debug=False, isCalLoss=True, train_label=train_label, mask=data.train_mask)
+  # out_model = model(feat, pos_encoding, debug = True)
+  # out = out_model[0]
+  # ##CALCULATING REGULAZATION FOR R
+  # states = torch.stack(out_model[1],dim=0)
+  # last_state = states[:,data.train_mask]
+  # state_sin = torch.sin(last_state)
+  # state_cos = torch.cos(last_state)
+  # train_label = data.y.squeeze()[data.train_mask]
+  # sin_label = [0 for _ in range(model.num_classes)]
+  # cos_label = [0 for _ in range(model.num_classes)]
+  # r_reg_loss = 0
+  # label_r = all_r = 0
+  # for m in range(1,2):
+  #   sin_label_order = cos_label_order = 0
+  #   for label in range(model.num_classes):
+  #     if m==1:
+  #       sin_label[label] = torch.mean(state_sin[:,train_label==label], dim=1)
+  #       cos_label[label] = torch.mean(state_cos[:,train_label==label], dim=1)
+  #       mean_feas = torch.mean(torch.ones_like(sin_label[label]) - torch.sqrt(cos_label[label]**2 + sin_label[label]**2), dim=-1)
+  #       mean_time = torch.mean(mean_feas) 
+  #       r_reg_loss +=  mean_time / model.num_classes
+  #       label_r = torch.clone(r_reg_loss)
+  #     avg_phi = torch.mean(last_state[:, train_label==label], dim=1)
+  #     sin_label_order += torch.sin(m*avg_phi) 
+  #     cos_label_order += torch.cos(m*avg_phi)  
+  #   mean_feas = torch.mean((sin_label_order**2 + cos_label_order**2)**0.5 / model.num_classes , dim=-1)
+  #   mean_time = torch.mean(mean_feas)/m
+  #   r_reg_loss += mean_time 
+  #   all_r += torch.clone(mean_time)
 
-  out, omega = model(feat, pos_encoding)
-  # omega = omega.mean(dim=-1)
-  # cos_state = torch.mean(torch.cos(omega))
-  # sin_state = torch.mean(torch.sin(omega))
-  # order = torch.sqrt(cos_state**2 + sin_state**2)
-
+  # for label1 in range(model.num_classes):
+  #   for label2 in range(label1+1, model.num_classes):
+  #       r_reg_loss -= (torch.sum((sin_label[label1] - sin_label[label2])**2 + (cos_label[label1] - cos_label[label2])**2))
+  
   if model.opt['dataset'] == 'ogbn-arxiv':
     lf = torch.nn.functional.nll_loss
-    loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask])
+    loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask]) + label_r + all_r
   else:
     lf = torch.nn.CrossEntropyLoss()
-    loss = lf(out[data.train_mask], data.y.squeeze()[data.train_mask])
-  if model.odeblock.nreg > 0:  # add regularisation - slower for small data, but faster and better performance for large data
-    reg_states = tuple(torch.mean(rs) for rs in model.reg_states)
-    regularization_coeffs = model.regularization_coeffs
+    loss = lf(out[data.train_mask], data.y.squeeze()[data.train_mask]) + label_r + all_r
+    # loss = label_r + all_r
+  # if hasattr(model, 'odeblock') and model.odeblock.nreg > 0:  # add regularisation - slower for small data, but faster and better performance for large data
+  #   reg_states = tuple(torch.mean(rs) for rs in model.reg_states)
+  #   regularization_coeffs = model.regularization_coeffs
 
-    reg_loss = sum(
-      reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0
-    )
-    loss = loss + reg_loss
-
-  model.fm.update(model.getNFE())
-  model.resetNFE()
+  #   reg_loss = sum(
+  #     reg_state * coeff for reg_state, coeff in zip(reg_states, regularization_coeffs) if coeff != 0
+  #   )
+  #   loss = loss + reg_loss
+  # try:
+  #   model.fm.update(model.getNFE())
+  #   model.resetNFE()
+  #   model.bm.update(model.getNFE())
+  #   model.resetNFE()
+  # except Exception as e:
+  #   pass
   loss.backward()
-  torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
+  torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
   optimizer.step()
-  model.bm.update(model.getNFE())
-  model.resetNFE()
+  # return loss.item()
   torch.cuda.empty_cache()
-  return loss.item()
+  return loss.item(), label_r, all_r
 
 
 def train_OGB(model, mp, optimizer, data, pos_encoding=None):
@@ -111,12 +144,8 @@ def train_OGB(model, mp, optimizer, data, pos_encoding=None):
     train_pred_idx = data.train_mask
 
   pos_encoding = mp(pos_encoding).to(model.device)
-  out, omega = model(feat, pos_encoding)
-  omega_norm = 0
-  for i in range(omega.size(0)):
-    for j in range(i+1, omega.size(0)):
-      omega_norm += torch.norm(omega[i]-omega[j])
-  
+  out = model(feat, pos_encoding)
+
   if model.opt['dataset'] == 'ogbn-arxiv':
     lf = torch.nn.functional.nll_loss
     loss = lf(out.log_softmax(dim=-1)[data.train_mask], data.y.squeeze(1)[data.train_mask])
@@ -132,35 +161,40 @@ def train_OGB(model, mp, optimizer, data, pos_encoding=None):
     )
     loss = loss + reg_loss
 
-  model.fm.update(model.getNFE())
-  model.resetNFE()
+#  model.fm.update(model.getNFE())
+#  model.resetNFE()
+#  model.bm.update(model.getNFE())
+#  model.resetNFE()
   loss.backward()
   optimizer.step()
-  model.bm.update(model.getNFE())
-  model.resetNFE()
   return loss.item()
 
 
 @torch.no_grad()
-def test(model, data, pos_encoding=None, opt=None):  # opt required for runtime polymorphism
+def test(model, data, pos_encoding=None, opt=None, debug=False, isCalLoss=False):  # opt required for runtime polymorphism
   model.eval()
   feat = data.x
   if model.opt['use_labels']:
     feat = add_labels(feat, data.y, data.train_mask, model.num_classes, model.device)
-  logits, omega = model(feat, pos_encoding)
-  omega = omega.mean(dim=-1)
-  cos_state = torch.mean(torch.cos(omega))
-  sin_state = torch.mean(torch.sin(omega))
-  order = torch.sqrt(cos_state**2 + sin_state**2)
-  
-  accs = []
+  # logits, accs = model(feat, pos_encoding), []
+  if isCalLoss:
+    test_label = data.y.squeeze()[data.test_mask]
+    out_model, label_r, all_r = model(feat, pos_encoding=False, debug=debug, isCalLoss=isCalLoss, train_label=test_label, mask=data.test_mask)
+  else:
+    out_model = model(feat, pos_encoding=False, debug=debug)
+
+  logits, accs = out_model, []
+
   for _, mask in data('train_mask', 'val_mask', 'test_mask'):
     pred = logits[mask].max(1)[1]
     acc = pred.eq(data.y[mask]).sum().item() / mask.sum().item()
     accs.append(acc)
-  accs.append(order)
+  # outs = model(feat,debug=True)
+  if debug==True:
+    return accs, out_model, label_r, all_r
+  if isCalLoss==True:
+    return accs, label_r, all_r
   return accs
-
 
 def print_model_params(model):
   print(model)
@@ -182,7 +216,7 @@ def test_OGB(model, data, pos_encoding, opt):
   evaluator = Evaluator(name=name)
   model.eval()
 
-  out = model(feat, pos_encoding)[0].log_softmax(dim=-1)
+  out = model(feat, pos_encoding).log_softmax(dim=-1)
   y_pred = out.argmax(dim=-1, keepdim=True)
 
   train_acc = evaluator.eval({
@@ -201,74 +235,34 @@ def test_OGB(model, data, pos_encoding, opt):
   return train_acc, valid_acc, test_acc
 
 
-def main(cmd_opt):
-  best_opt = best_params_dict[cmd_opt['dataset']]
-  opt = {**cmd_opt, **best_opt}
-  if opt['kuramoto']==1:
-    opt['time'] = cmd_opt['time']
-    opt['step_size'] = cmd_opt['step_size']
-    opt['method'] = cmd_opt['method']
-    opt['hidden_dim'] = cmd_opt['hidden_dim']
-    opt['add_source'] = False
-    # if cmd_opt['function']=='transformer':
-    #     opt['function']=cmd_opt['function']
-    # if cmd_opt['block']=='constant':
-    #     opt['block']=cmd_opt['block']
+def main(cmd_opt, split):
+#   best_opt = best_params_dict[cmd_opt['dataset']]
+#   opt = {**cmd_opt,**best_opt}
+  opt = {**cmd_opt}
+  wandb_name = f"step: {opt['step_size']} depth: {opt['depth']}  coupling_strength: {opt['coupling_strength']} hidden: {opt['hidden_dim']}"
+  num_run = f"split: {split}"
+  if opt["one_block"]:
+     group_name = 'Kuramoto_' + opt['dataset'] + 'OneBlock'
   else:
-    opt['time'] = cmd_opt['time']
-    opt['step_size'] = cmd_opt['step_size']
-    opt['method'] = cmd_opt['method']
-
-      
-  # wandb_name = f"time: {opt['time']}  coupling_strength: {opt['coupling_strength']} school-run{opt['run_time']}"
-  wandb_name = f"school-run{opt['run_time']}"
-  # num_run = f"run-time: {opt['run_time']}"
-  num_run = f"split: {opt['split_hetero']}"
-  group_name = ''
-  if opt['add_noise']==1:
-    group_name = 'Noisy'
-  if opt['kuramoto']==1:
-    group_name += 'Kuramoto_'
-  else:
-    group_name += 'GRAND_'
-  # group_name += opt['dataset'] + '_' + opt['method'] + '_' +'label_'+str(opt['split_rate'])+'_'+opt['function']
-  group_name += opt['dataset'] + '_' + opt['method'] + '_hidden'+str(opt['hidden_dim'])+'T: '+str(opt['time'])+'coup: '+str(opt['coupling_strength'])
-     
+     group_name = 'RK4' + opt['dataset'] + 'final'
+ 
   print(wandb_name, group_name, num_run)
-  if opt['logging']==1:
-    wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
-    wandb.config = opt
+  wandb.init(project="my_grand", entity="ductuan024", name=num_run, group=group_name, job_type=wandb_name, reinit=True)
+  wandb.config = opt
+  print(opt['step_size'])
 
-  if cmd_opt['beltrami']:
-    opt['beltrami'] = True
-  if not opt['is_webKB']:
-    dataset = get_dataset(opt, '../data', opt['not_lcc'])
-  else:
-    dataset = get_data(opt['dataset'], opt['split_hetero'])
+  dataset = get_data(opt['dataset'], split)
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  if opt['gpu'] == -1:
-    device = 'cpu'
-  else:
-    device = torch.device('cuda:{0}'.format(str(opt['gpu'])) if torch.cuda.is_available() else 'cpu')
-  if opt['beltrami']:
-    pos_encoding = apply_beltrami(dataset.data, opt).to(device)
-    opt['pos_enc_dim'] = pos_encoding.shape[1]
-  else:
-    pos_encoding = None
+  pos_encoding = None
+#
+#  if opt['rewire_KNN'] or opt['fa_layer']:
+#    model = GNN_KNN(opt, dataset, device).to(device) if opt["no_early"] else GNNKNNEarly(opt, dataset, device).to(device)
+#  else:
+#    model = GNN(opt, dataset, device).to(device) if opt["no_early"] else GNNEarly(opt, dataset, device).to(device)
+  model = GrandExtendDiscritizedNet(opt, dataset, device).to(device)
 
-  if opt['rewire_KNN'] or opt['fa_layer']:
-    model = GNN_KNN(opt, dataset, device).to(device) if opt["no_early"] else GNNKNNEarly(opt, dataset, device).to(device)
-  else:
-    model = GNN(opt, dataset, device).to(device) if opt["no_early"] else GNNEarly(opt, dataset, device).to(device)
-  
-  if not opt['planetoid_split'] and opt['dataset'] in ['Cora','Citeseer','Pubmed']:
-    dataset.data = set_train_val_test_split(np.random.randint(0, 1000), dataset.data, num_development=5000 if opt["dataset"] == "CoauthorCS" else 1500,num_per_class=opt['split_rate'])
-  if opt['add_noise']==1:
-      dataset.data.x = dataset.data.x + torch.randn_like(dataset.data.x)
-  if not opt['is_webKB']:
-    data = dataset.data.to(device)
-  else:
-    data = dataset.to(device)
+  data = dataset.to(device)
 
   parameters = [p for p in model.parameters() if p.requires_grad]
   print_model_params(model)
@@ -276,20 +270,14 @@ def main(cmd_opt):
   best_time = best_epoch = train_acc = val_acc = test_acc = 0
 
   this_test = test_OGB if opt['dataset'] == 'ogbn-arxiv' else test
-  cnt = 0
-  for epoch in range(1, opt['epoch']):
+  for epoch in tqdm.tqdm(range(1, opt['epoch'] + 1)):
     start_time = time.time()
 
     if opt['rewire_KNN'] and epoch % opt['rewire_KNN_epoch'] == 0 and epoch != 0:
       ei = apply_KNN(data, pos_encoding, model, opt)
       model.odeblock.odefunc.edge_index = ei
-
-    loss = train(model, optimizer, data, pos_encoding)
-    #print('------------DONE TRAIN-------------')
-    #for p in model.parameters():
-    #    if p.requires_grad:
-    #        print(p.name,p.data)
-    tmp_train_acc, tmp_val_acc, tmp_test_acc, tmp_order = this_test(model, data, pos_encoding, opt)
+    loss, label_r, between_r = train(model, optimizer, data, pos_encoding)
+    tmp_train_acc, tmp_val_acc, tmp_test_acc = this_test(model, data, pos_encoding, opt)
 
     best_time = opt['time']
     if tmp_val_acc > val_acc:
@@ -298,48 +286,44 @@ def main(cmd_opt):
       val_acc = tmp_val_acc
       test_acc = tmp_test_acc
       best_time = opt['time']
-      order = tmp_order
-      cnt = 0
-    else:
-      cnt += 1
-      if cnt == 100:
-        break
-    if not opt['no_early'] and model.odeblock.test_integrator.solver.best_val > val_acc:
-      best_epoch = epoch
-      val_acc = model.odeblock.test_integrator.solver.best_val
-      test_acc = model.odeblock.test_integrator.solver.best_test
-      train_acc = model.odeblock.test_integrator.solver.best_train
-      best_time = model.odeblock.test_integrator.solver.best_time
+      best_label_r = label_r
+      best_between_r = between_r
+#    if not opt['no_early'] and model.odeblock.test_integrator.solver.best_val > val_acc:
+#      best_epoch = epoch
+#      val_acc = model.odeblock.test_integrator.solver.best_val
+#      test_acc = model.odeblock.test_integrator.solver.best_test
+#      train_acc = model.odeblock.test_integrator.solver.best_train
+#      best_time = model.odeblock.test_integrator.solver.best_time
 
-    log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, forward nfe {:d}, backward nfe {:d}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, Order: {:.4f}, Best time: {:.4f}'
-    if opt['logging']==1:
-      wandb.log(
-        {
-              'train_acc': tmp_train_acc,
-              'test_acc': tmp_test_acc,
-              'val_acc': tmp_val_acc,
-              'loss': loss
-          }
-      )
+    log = 'Epoch: {:03d}, Runtime {:03f}, Loss {:03f}, Train: {:.4f}, Val: {:.4f}, Test: {:.4f}, InLabel_R: {:.4f}, Between_R: {:.4f}, Best time: {:.4f}'
 
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    print(log.format(epoch, time.time() - start_time, loss, model.fm.sum, model.bm.sum, train_acc, val_acc, test_acc, order, best_time))
-  print('best val accuracy {:03f} with test accuracy {:03f}, order {:03f} at epoch {:d} and best time {:03f}'.format(val_acc, test_acc,
-                                                                                                     order,
-                                                                                                     best_epoch,
-                                                                                                     best_time))
-  if opt['logging']==1:
+    print(log.format(epoch, time.time() - start_time, loss, tmp_train_acc, tmp_val_acc, tmp_test_acc, label_r, between_r, best_time))
     wandb.log(
         {
-            'best_epoch' : best_epoch,
-            'best_val' : val_acc,
-            'best_test' : test_acc,
-            'best_order' : order,
+            'train_acc': tmp_train_acc,
+            'test_acc': tmp_test_acc,
+            'val_acc': tmp_val_acc,
+            'label_r':label_r,
+            'between_r':between_r,
+            'loss': loss
         }
-            )
-
+    )
+    gc.collect()
+    torch.cuda.empty_cache()
+  print('best val accuracy {:03f} with test accuracy {:03f} at epoch {:d} and best inlabel_r {:03f}, between_r {:03f}'.format(val_acc, 
+                                                                                                     test_acc,
+                                                                                                     best_epoch,
+                                                                                                     best_label_r,
+                                                                                                     best_between_r))
+  wandb.log(
+      {
+          'best_epoch' : best_epoch,
+          'best_val' : val_acc,
+          'best_test' : test_acc,
+          'best_label_r': best_label_r,
+          'best_between_r': best_between_r,
+      }
+           )
   return train_acc, val_acc, test_acc
 
 
@@ -347,39 +331,37 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--use_cora_defaults', action='store_true',
                       help='Whether to run with best params for cora. Overrides the choice of dataset')
-  # KuGraph args
-  parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
-  parser.add_argument('--run_time', type=int, default=1, help='The current number of runs')  
-  
-  parser.add_argument('--split_rate', type=int, default=20, help='The current number of runs')  
-  parser.add_argument('--kuramoto', type=int, default=0, help='The current number of runs') 
-  parser.add_argument('--add_noise', type=int, default=0, help='The current number of runs')
-  parser.add_argument('--logging', type=int, default=1, help='The current number of runs')
-  parser.add_argument('--split_hetero', type=int, default=0, help='The current number of runs')
   # data args
-  parser.add_argument('--dataset', type=str, default='Cora',
-                      help='Cora, Citeseer, Pubmed, Computers, Photo, CoauthorCS, ogbn-arxiv')
+  parser.add_argument('--dataset', type=str, default='texas',
+                      help='texas, cornell, wisconsin')
   parser.add_argument('--data_norm', type=str, default='rw',
                       help='rw for random walk, gcn for symmetric gcn norm')
   parser.add_argument('--self_loop_weight', type=float, default=1.0, help='Weight of self-loops.')
   parser.add_argument('--use_labels', dest='use_labels', action='store_true', help='Also diffuse labels')
   parser.add_argument('--label_rate', type=float, default=0.5,
                       help='% of training labels to use when --use_labels is set.')
-  parser.add_argument('--planetoid_split', action='store_true',
-                      help='use planetoid splits for Cora/Citeseer/Pubmed')
   # GNN args
-  parser.add_argument('--hidden_dim', type=int, default=16, help='Hidden dimension.')
+  parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension.')
   parser.add_argument('--fc_out', dest='fc_out', action='store_true',
                       help='Add a fully connected layer to the decoder.')
-  parser.add_argument('--input_dropout', type=float, default=0.5, help='Input dropout rate.')
-  parser.add_argument('--dropout', type=float, default=0.0, help='Dropout rate.')
+  parser.add_argument('--input_dropout', type=float, default=0.2, help='Input dropout rate.')
+  parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate.')
   parser.add_argument("--batch_norm", dest='batch_norm', action='store_true', help='search over reg params')
-  parser.add_argument('--optimizer', type=str, default='adam', help='One from sgd, rmsprop, adam, adagrad, adamax.')
-  parser.add_argument('--lr', type=float, default=0.01, help='Learning rate.')
-  parser.add_argument('--decay', type=float, default=5e-4, help='Weight decay for optimization')
-  parser.add_argument('--epoch', type=int, default=100, help='Number of training epochs per iteration.')
-  parser.add_argument('--alpha', type=float, default=1.0, help='Factor in front matrix A.')
+  parser.add_argument('--optimizer', type=str, default='adamax', help='One from sgd, rmsprop, adam, adagrad, adamax.')
+  parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate.')
+  parser.add_argument('--decay', type=float, default=1e-3, help='Weight decay for optimization')
+  parser.add_argument('--epoch', type=int, default=500, help='Number of training epochs per iteration.')
+  parser.add_argument('--alpha', type=float, default=0.8, help='Factor in front matrix A.')
   parser.add_argument('--alpha_dim', type=str, default='sc', help='choose either scalar (sc) or vector (vc) alpha')
+
+
+  ### discritized param
+  parser.add_argument('--depth', type=int, default=128, help='Default depth of the network')
+  parser.add_argument('--discritize_type', type=str, default="norm", help="norm or acc_norm")
+  parser.add_argument('--one_block', action='store_true', help='perform Linear Attention')
+  parser.add_argument('--coupling_strength', type=float, default=3.0, help='Kuramoto coupling strength')
+
+  ################# end of discritized param
   parser.add_argument('--no_alpha_sigmoid', dest='no_alpha_sigmoid', action='store_true',
                       help='apply sigmoid before multiplying by alpha')
   parser.add_argument('--beta_dim', type=str, default='sc', help='choose either scalar (sc) or vector (vc) beta')
@@ -391,12 +373,12 @@ if __name__ == '__main__':
                       help='If try get rid of alpha param and the beta*x0 source term')
 
   # ODE args
-  parser.add_argument('--time', type=float, default=1.0, help='End time of ODE integrator.')
+  parser.add_argument('--time', type=float, default=100.0, help='End time of ODE integrator.')
   parser.add_argument('--augment', action='store_true',
                       help='double the length of the feature vector by appending zeros to stabilist ODE learning')
   parser.add_argument('--method', type=str, default='dopri5',
                       help="set the numerical solver: dopri5, euler, rk4, midpoint")
-  parser.add_argument('--step_size', type=float, default=1,
+  parser.add_argument('--step_size', type=float, default=0.01,
                       help='fixed step size when using fixed step solvers e.g. rk4')
   parser.add_argument('--max_iters', type=float, default=100, help='maximum number of integration steps')
   parser.add_argument("--adjoint_method", type=str, default="adaptive_heun",
@@ -409,7 +391,7 @@ if __name__ == '__main__':
   parser.add_argument("--tol_scale_adjoint", type=float, default=1.0,
                       help="multiplier for adjoint_atol and adjoint_rtol")
   parser.add_argument('--ode_blocks', type=int, default=1, help='number of ode blocks to run')
-  parser.add_argument("--max_nfe", type=int, default=1000,
+  parser.add_argument("--max_nfe", type=int, default=10000,
                       help="Maximum number of function evaluations in an epoch. Stiff ODEs will hang if not set.")
   parser.add_argument("--no_early", action="store_true",
                       help="Whether or not to use early stopping of the ODE integrator when testing.")
@@ -419,9 +401,9 @@ if __name__ == '__main__':
                            "used if getting OOM errors at test time")
 
   # Attention args
-  parser.add_argument('--leaky_relu_slope', type=float, default=0.2,
+  parser.add_argument('--leaky_relu_slope', type=float, default=0.15,
                       help='slope of the negative part of the leaky relu used in attention')
-  parser.add_argument('--attention_dropout', type=float, default=0., help='dropout of attention weights')
+  parser.add_argument('--attention_dropout', type=float, default=0.2, help='dropout of attention weights')
   parser.add_argument('--heads', type=int, default=4, help='number of attention heads')
   parser.add_argument('--attention_norm_idx', type=int, default=0, help='0 = normalise rows, 1 = normalise cols')
   parser.add_argument('--attention_dim', type=int, default=64,
@@ -499,11 +481,12 @@ if __name__ == '__main__':
 
   parser.add_argument('--pos_dist_quantile', type=float, default=0.001, help="percentage of N**2 edges to keep")
 
-  parser.add_argument('--depth', type=int, default=10)
-  parser.add_argument('--discritize_type', type=str, default="norm")
+
   args = parser.parse_args()
 
   opt = vars(args)
-
   opt['is_webKB'] = True
-  main(opt)
+#   print(opt["attention_type"])
+#   print(opt['epoch'])
+  for split in range(10):
+      main(opt, split)

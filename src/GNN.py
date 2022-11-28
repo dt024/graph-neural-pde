@@ -12,7 +12,10 @@ class GNN(BaseGNN):
     self.f = set_function(opt)
     block = set_block(opt)
     time_tensor = torch.tensor([0, self.T]).to(device)
-    self.odeblock = block(self.f, self.regularization_fns, opt, dataset.data, device, t=time_tensor).to(device)
+    if not opt['is_webKB']:
+      self.odeblock = block(self.f, self.regularization_fns, opt, dataset.data, device, t=time_tensor).to(device)
+    else:
+      self.odeblock = block(self.f, self.regularization_fns, opt, dataset, device, t=time_tensor).to(device)
 
   def forward(self, x, pos_encoding=None):
     # Encode each node based on its feature.
