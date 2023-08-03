@@ -107,7 +107,7 @@ class BaseGNN(MessagePassing):
       self.num_features = dataset.data.num_features
       self.num_nodes = dataset.data.num_nodes
     else:
-      self.num_classes = 5
+      self.num_classes = len(dataset.y.unique())
       self.num_features = dataset.num_features
       self.num_nodes = dataset.num_nodes
     self.device = device

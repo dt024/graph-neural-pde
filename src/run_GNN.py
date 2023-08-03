@@ -12,7 +12,7 @@ from GNN_KNN import GNN_KNN
 from GNN_KNN_early import GNNKNNEarly
 import time
 from data import get_dataset, set_train_val_test_split
-from data_heterophilic import get_data
+from data_heterophilic import get_data,get_new_hetero_data
 from ogb.nodeproppred import Evaluator
 from graph_rewiring import apply_KNN, apply_beltrami, apply_edge_sampling
 from best_params import  best_params_dict
@@ -244,7 +244,10 @@ def main(cmd_opt):
   if not opt['is_webKB']:
     dataset = get_dataset(opt, '../data', opt['not_lcc'])
   else:
-    dataset = get_data(opt['dataset'], opt['split_hetero'])
+    if opt['dataset'] in ['roman-empire','amazon-ratings']:
+      dataset = get_new_hetero_data(opt['dataset'], opt['split_hetero'])
+    else:
+      dataset = get_data(opt['dataset'], opt['split_hetero'])
 
   if opt['gpu'] == -1:
     device = 'cpu'

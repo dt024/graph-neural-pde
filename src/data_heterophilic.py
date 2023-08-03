@@ -1,6 +1,8 @@
 from torch_geometric.datasets import WebKB
 import torch
 import numpy as np
+from torch_geometric.data import Data
+
 
 DATA_PATH = '../data/'
 
@@ -19,3 +21,15 @@ def get_data(name, split=0):
   data.test_mask = torch.tensor(test_mask, dtype=torch.bool)
 
   return data
+
+def get_new_hetero_data(name, split=0, device='cpu'):
+    path = DATA_PATH+f'{name.replace("-", "_")}.npz'
+    data = np.load(path)
+    node_features = torch.tensor(data['node_features'])
+    labels = torch.tensor(data['node_labels'])
+    edges = torch.tensor(data['edges'].T)
+    train_masks = torch.tensor(data['train_masks'][split])
+    val_masks = torch.tensor(data['val_masks'][split])
+    test_masks = torch.tensor(data['test_masks'][split])
+
+    return Data(x=node_features, edge_index=edges, y=labels, train_mask=train_masks, val_mask=val_masks, test_mask=test_masks, num_classes=len(labels.unique()))

@@ -26,6 +26,7 @@ class LaplacianODEFunc(ODEFunc):
     self.beta_sc = nn.Parameter(torch.ones(1))
     self.K = opt['coupling_strength']
     self.kuramoto = opt['kuramoto']
+    self.lin = nn.Linear(in_features, out_features)
   def sparse_multiply(self, x):
     if self.opt['block'] in ['attention']:  # adj is a multihead attention
       mean_attention = self.attention_weights.mean(dim=1)
@@ -39,7 +40,14 @@ class LaplacianODEFunc(ODEFunc):
     elif self.opt['block'] in ['mixed', 'hard_attention']:  # adj is a torch sparse matrix
       ax = torch_sparse.spmm(self.edge_index, self.attention_weights, x.shape[0], x.shape[0], x)
     else:  # adj is a torch sparse matrix
-      ax = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
+      if self.kuramoto == 0:
+        ax = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
+      else:
+        cos_R = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], torch.cos(x))
+        sin_R = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], torch.sin(x))
+        phi = torch_sparse.spmm(self.edge_index, self.edge_weight, x.shape[0], x.shape[0], x)
+        return phi, cos_R, sin_R
+
     return ax
 
   def forward(self, t, x):  # the t param is needed by the ODE solver.
